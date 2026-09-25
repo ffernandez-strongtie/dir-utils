@@ -65,7 +65,7 @@ if($Server -ieq 'SST'){$Server='.\SST'}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $map=[ordered]@{Quantity='ComponentQuantity';NumPlies='TrussPlyCount';Thickness='TrussThicknessInches';OverallTrussHeight='OverallTrussHeightInches';LeftOverhang='LeftOverhangInches';RightOverhang='RightOverhangInches';LeftCantilever='LeftCantileverInches';RightCantilever='RightCantileverInches';LeftHeelHeight='LeftHeelHeightInches';RightHeelHeight='RightHeelHeightInches';PitchLeftTopOver12='LeftTopPitchOver12';PitchRightTopOver12='RightTopPitchOver12';PitchLeftBottomOver12='LeftBottomPitchOver12';PitchRightBottomOver12='RightBottomPitchOver12';IsAttic='IsAttic';IsGable='IsGable';IsGirder='IsGirder';IsFlipped='IsFlipped';OCSpacing='OCSpacing'}
 function ReadReportOwner($serverName,$databaseName,[string]$keyUpPath){
- $owner=[ordered]@{CompanyName=$null;ReferenceNumber=$null;CompanySource='dbo.Company.Name (CompanyType: Our Company)';ReferenceSource=$keyUpPath;Notes=@()}
+ $owner=[ordered]@{CompanyName=$null;CompanyNames=@();ReferenceNumber=$null;CompanySource='dbo.Company.Name (CompanyType: Our Company)';ReferenceSource=$keyUpPath;Notes=@()}
  $connection=[Data.SqlClient.SqlConnection]::new();$command=$null;$reader=$null
  try{
   $connectionSettings=[Data.SqlClient.SqlConnectionStringBuilder]::new()
@@ -76,9 +76,9 @@ function ReadReportOwner($serverName,$databaseName,[string]$keyUpPath){
   $command.CommandText="SELECT DISTINCT c.Name FROM dbo.Company c JOIN dbo.CompanyType t ON t.CompanyTypeKey=c.CompanyTypeKey WHERE t.Name=N'Our Company'"
   $reader=$command.ExecuteReader();$names=[Collections.Generic.List[string]]::new()
   while($reader.Read()){if(-not $reader.IsDBNull(0)){$name=$reader.GetString(0).Trim();if($name -and -not $names.Contains($name)){$names.Add($name)}}}
-  if($names.Count -eq 1){$owner.CompanyName=$names[0]}
-  elseif($names.Count -eq 0){$owner.Notes+='Company name unavailable: no named Our Company record.'}
-  else{$owner.Notes+='Company name unavailable: multiple Our Company names.'}
+  $owner.CompanyNames=@($names | Sort-Object -Unique)
+  if($owner.CompanyNames.Count -gt 0){$owner.CompanyName=$owner.CompanyNames -join '; '}
+  else{$owner.Notes+='Company name unavailable: no named Our Company record.'}
  }catch{$owner.Notes+='Company name unavailable: '+$_.Exception.Message}
  finally{if($reader){$reader.Dispose()};if($command){$command.Dispose()};$connection.Dispose()}
  try{
