@@ -1,4 +1,4 @@
-# Database and Project File Sync Report
+﻿# Database and Project File Sync Report
 
 **Script:** [csdirector-database-project-file-sync-report.ps1](./csdirector-database-project-file-sync-report.ps1)
 
@@ -38,7 +38,7 @@ The script prompts for the projects root, SQL server, database, and output base 
 | Option | Behavior |
 | --- | --- |
 | `-ProjectId` | Restrict the scan to one or more project folder identifiers. |
-| `-Limit` | Process the first N selected projects in sorted order; `0` means no limit. |
+| `-Limit` | Include at most N projects. Archive projects come first, ranked by their newest eligible csdproj modification time descending; ties use project identifier. All archives for each selected project are included. Only after archive projects are exhausted do DB-only projects fill remaining slots, newest DB modification first. `0` means no limit. |
 | `-Evidence True` | Retain copied archives, extracted JSON, and detailed comparison inventories. Default: `False`. |
 | `-Timestamp` | Enable timestamp comparisons. Off by default. |
 | `-FileTimeZone`, `-DatabaseTimeZone` | Interpret timestamps using the specified Windows time zones. Each defaults to the current machine's time zone. |
@@ -75,9 +75,11 @@ Both formula totals use file layout quantities and membership. DB quantity diffe
 
 ## Output
 
-Each run creates a new directory using the output base plus a UTC timestamp and unique suffix, including when a custom output base is supplied.
+Each run creates a new directory with a lowercase name using the output base, sanitized company name, UTC timestamp, and unique suffix, including when a custom output base is supplied (for example, `output-spates-fabricators-inc-timestamp-suffix`).
 
-- `index.html`: overview with links to project details and an expandable legend.
+The index and every project page show the company at the right, its unique Server Reference beneath it, and the report creation date/time in UTC below that. All pages use the same timestamp captured once per run, also saved as `ReportCreatedUtc` in `settings.json`. The company comes from `dbo.Company.Name` with company type `Our Company`. The reference comes from the first line of `C:\SST\Server\Util\KeyUp.ini`; use `-KeyUpPath` for another installation. For remote or restored databases, select the matching INI file. Missing or ambiguous identity information produces warnings and unavailable labels without blocking the report. Missing company names use `unknown-company` in folder names. Identity sources and lookup notes are saved in `settings.json`.
+
+- `index.html`: overview with links to project details and an expandable legend. The first column shows the source csdproj file’s last-modified time in UTC, or the DB project’s last-modified wall time for projects without archives. Each section is sorted newest first, independently of the optional truss timestamp comparisons.
 - `projects/`: individual project HTML reports.
 - `summary.json` and `settings.json`: machine-readable results and run settings.
 - `evidence/`: supporting copies and inventories when `-Evidence True` is enabled.
@@ -85,3 +87,15 @@ Each run creates a new directory using the output base plus a UTC timestamp and 
 Open `index.html` in a browser. Temporary working files are removed by default; originals and SQL records remain unchanged.
 
 [Back to script index](../README.md)
+
+## Legacy projects before 2024.r7
+
+The delayed 2024.r7 release changed the source of truth from database values to project files. The actual customer upgrade date is unknown. The report marks a project/archive as **Possibly Legacy [2024.r7]** only when its archive was read successfully, no truss JSON exists, a unique database project has truss records, and all checked project, component/header/truss, and piece modification dates are known and on or before January 8, 2025 (inclusive, database wall time). Empty projects and failed/missing evidence do not qualify.
+
+These rows appear yellow in their own **Possibly Legacy [2024.r7]** section, newest first. Comparison values are suppressed in HTML, console output, and summary JSON. The explanation and latest DB modification time remain in the summary. Projects with later or unknown dates and no JSON remain unresolved; the release date does not establish when a customer upgraded. Use `-LegacyCutoffDate yyyy-MM-dd` to change the approximate cutoff when better deployment information is available.
+
+## Database projects without archives
+
+After **Empty**, the index lists **DB projects without csdproj**, sorted by DB project modification time descending (unknown dates last). The first column shows the DB project’s last-modified time (database wall time, not creation time). The DB truss count remains in its normal inventory column; unavailable values use gray cells with `-`. Each row links to a project page carrying the same report identity header. These records are also included in `summary.json`.
+
+This check compares database projects against the full eligible archive inventory under `ProjectsRoot`, before `-Limit` is applied. `-Limit` is shared: archive projects use the budget first, then DB-only projects fill remaining slots in descending DB modification order; `-ProjectId` restricts both lists. Existing exclusions apply (DeletedProjects, directory reparse points, and Attachment_/Attachments_ archives). “No csdproj found” describes this scan scope, not proof that no archive exists elsewhere.

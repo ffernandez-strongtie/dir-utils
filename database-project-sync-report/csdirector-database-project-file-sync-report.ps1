@@ -27,8 +27,10 @@ param(
  [string]$Database='CSDatabaseServer',
  [string]$OutputDirectory=(Join-Path (Get-Location).Path 'output'),
  [string[]]$ProjectId,
+ [string]$KeyUpPath='C:\SST\Server\Util\KeyUp.ini',
  [ValidateSet('True','False')][string]$Evidence='False',
  [switch]$Timestamp,
+ [datetime]$LegacyCutoffDate=[datetime]'2025-01-08',
  [ValidateRange(0,2147483647)][int]$Limit=0,
  [string]$FileTimeZone=([TimeZoneInfo]::Local.Id),
  [string]$DatabaseTimeZone=([TimeZoneInfo]::Local.Id),
@@ -62,6 +64,39 @@ foreach($inputName in @('ProjectsRoot','Server','Database','OutputDirectory')) {
 if($Server -ieq 'SST'){$Server='.\SST'}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $map=[ordered]@{Quantity='ComponentQuantity';NumPlies='TrussPlyCount';Thickness='TrussThicknessInches';OverallTrussHeight='OverallTrussHeightInches';LeftOverhang='LeftOverhangInches';RightOverhang='RightOverhangInches';LeftCantilever='LeftCantileverInches';RightCantilever='RightCantileverInches';LeftHeelHeight='LeftHeelHeightInches';RightHeelHeight='RightHeelHeightInches';PitchLeftTopOver12='LeftTopPitchOver12';PitchRightTopOver12='RightTopPitchOver12';PitchLeftBottomOver12='LeftBottomPitchOver12';PitchRightBottomOver12='RightBottomPitchOver12';IsAttic='IsAttic';IsGable='IsGable';IsGirder='IsGirder';IsFlipped='IsFlipped';OCSpacing='OCSpacing'}
+function ReadReportOwner($serverName,$databaseName,[string]$keyUpPath){
+ $owner=[ordered]@{CompanyName=$null;ReferenceNumber=$null;CompanySource='dbo.Company.Name (CompanyType: Our Company)';ReferenceSource=$keyUpPath;Notes=@()}
+ $connection=[Data.SqlClient.SqlConnection]::new();$command=$null;$reader=$null
+ try{
+  $connectionSettings=[Data.SqlClient.SqlConnectionStringBuilder]::new()
+  $connectionSettings['Data Source']=$serverName;$connectionSettings['Initial Catalog']=$databaseName
+  $connectionSettings['Integrated Security']=$true;$connectionSettings['Connect Timeout']=15
+  $connection.ConnectionString=$connectionSettings.ConnectionString;$connection.Open()
+  $command=$connection.CreateCommand();$command.CommandTimeout=15
+  $command.CommandText="SELECT DISTINCT c.Name FROM dbo.Company c JOIN dbo.CompanyType t ON t.CompanyTypeKey=c.CompanyTypeKey WHERE t.Name=N'Our Company'"
+  $reader=$command.ExecuteReader();$names=[Collections.Generic.List[string]]::new()
+  while($reader.Read()){if(-not $reader.IsDBNull(0)){$name=$reader.GetString(0).Trim();if($name -and -not $names.Contains($name)){$names.Add($name)}}}
+  if($names.Count -eq 1){$owner.CompanyName=$names[0]}
+  elseif($names.Count -eq 0){$owner.Notes+='Company name unavailable: no named Our Company record.'}
+  else{$owner.Notes+='Company name unavailable: multiple Our Company names.'}
+ }catch{$owner.Notes+='Company name unavailable: '+$_.Exception.Message}
+ finally{if($reader){$reader.Dispose()};if($command){$command.Dispose()};$connection.Dispose()}
+ try{
+  $firstLine=Get-Content -LiteralPath $keyUpPath -TotalCount 1 -ErrorAction Stop
+  $reference=([string]$firstLine).Trim()
+  if($reference -notmatch '^[0-9]+$'){throw 'First line must contain a numeric reference number.'}
+  $owner.ReferenceNumber=$reference
+ }catch{$owner.Notes+='Reference number unavailable: '+$_.Exception.Message}
+ [pscustomobject]$owner
+}
+function CompanyFolderName([string]$name){
+ # Keep Unicode letters/numbers; remove Windows path punctuation and bound length.
+ $safe=([regex]::Replace($name,'[^\p{L}\p{Nd}]+','-')).Trim('-')
+ if($safe.Length -gt 80){$safe=$safe.Substring(0,80).TrimEnd('-')}
+ if(-not $safe){return 'unknown-company'}
+ if($safe -match '^(?i:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$'){$safe='company-'+$safe}
+ $safe
+}
 function Enc($v){[Net.WebUtility]::HtmlEncode([string]$v)}
 function RawDate($v){if($null -eq $v -or $v -is [DBNull]){return ''};([datetime]$v).ToString('yyyy-MM-dd HH:mm:ss.fffffff')}
 function UtcDate([datetime]$v,$zone){$wall=[datetime]::SpecifyKind($v,[DateTimeKind]::Unspecified);if($zone.IsInvalidTime($wall) -or $zone.IsAmbiguousTime($wall)){throw 'Ambiguous or invalid daylight-saving wall time'};[TimeZoneInfo]::ConvertTimeToUtc($wall,$zone)}
@@ -87,7 +122,26 @@ function CellColor($column,$value){
  }
  return ''
 }
+function LegacyAssessment($projectTable,$databaseRows,$pieceTable,[bool]$archiveComplete,[int]$jsonTrusses,[datetime]$cutoff){
+ $result=[ordered]@{IsLegacy=$false;LatestDatabaseModified=$null;CutoffDate=$cutoff.Date;Reason=''}
+ if(-not $archiveComplete -or $jsonTrusses -ne 0 -or $projectTable.Rows.Count -ne 1 -or @($databaseRows).Count -eq 0 -or $null -eq $pieceTable){return [pscustomobject]$result}
+ # Require known modification dates for the project and all compared DB records.
+ $dates=[Collections.Generic.List[datetime]]::new()
+ $value=$projectTable.Rows[0].ProjectModified
+ if($null -eq $value -or $value -is [DBNull]){return [pscustomobject]$result};$dates.Add([datetime]$value)
+ foreach($record in $databaseRows){foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')){
+  $value=$record.$field;if($null -eq $value -or $value -is [DBNull]){return [pscustomobject]$result};$dates.Add([datetime]$value)
+ }}
+ foreach($piece in $pieceTable.Rows){$value=$piece.LastModifiedDateTime;if($null -eq $value -or $value -is [DBNull]){return [pscustomobject]$result};$dates.Add([datetime]$value)}
+ $latest=($dates | Sort-Object -Descending | Select-Object -First 1);$result.LatestDatabaseModified=$latest
+ if($latest -lt $cutoff.Date.AddDays(1)){
+  $result.IsLegacy=$true
+  $result.Reason='Possibly Legacy [2024.r7]: no truss JSON exists and the latest project/truss/piece DB modification ('+$latest.ToString('yyyy-MM-dd HH:mm:ss')+', DB wall time) is on or before '+$cutoff.ToString('yyyy-MM-dd')+'. The actual customer upgrade date is unknown; the cutoff is an approximate release milestone, not a verified installation date. Before the delayed 2024.r7 release, values were stored directly in the database; project files were not the source of truth. File/DB comparisons are not applicable and should be ignored.'
+ }
+ [pscustomobject]$result
+}
 function HealthyProject($row){
+ if($row.LegacyPre2024R7){return $false}
  $paired=[int]$row.TdlMatchedNames
  return ($paired -gt 0 -and $row.TdlTrussCount -eq $paired -and $row.DbTrussCount -eq $paired -and
   $row.'Data synced' -eq $paired -and $row.ChecksumSame -eq $paired -and
@@ -102,6 +156,7 @@ function BoardFeetStatus($row){
 }
 
 function StatusHtml($row){
+ if($row.LegacyPre2024R7){return '<b title="'+(Enc $row.LegacyReason)+'">Possibly Legacy [2024.r7]</b><br><small>Comparisons not applicable</small>'}
  $parts=[Collections.Generic.List[string]]::new()
  if($row.Healthy){$parts.Add('<div class="close healthy-status" style="padding:5px;margin:3px 0"><b>Healthy</b></div>')}elseif(HealthyProject $row){$parts.Add('<div class="close" style="padding:5px;margin:3px 0"><b>Inventory / fields / files match</b></div>')}
  if($row.BoardFeetSettingsDifferent -eq $true){
@@ -456,7 +511,7 @@ function OverviewStyle {
  @'
 <style id="overview-layout-style">
 body.overview-page{height:100vh;height:100dvh;box-sizing:border-box;margin:0;padding:12px 16px;overflow:hidden;display:flex;flex-direction:column;gap:10px}
-.overview-page>h2{margin:0;font-size:22px;line-height:1.3;flex-shrink:0}
+.overview-page .report-header h2{font-size:22px;line-height:1.3}
 .overview-page>.report-legend{margin:0;padding:12px 16px;flex-shrink:0;min-height:0;max-height:60vh;max-height:min(60dvh,calc(100dvh - 150px));overflow:auto;box-sizing:border-box}
 .overview-page>.report-legend>summary{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;list-style:none}
 .overview-page>.report-legend>summary::-webkit-details-marker{display:none}
@@ -465,7 +520,7 @@ body.overview-page{height:100vh;height:100dvh;box-sizing:border-box;margin:0;pad
 .overview-page .legend-summary-label{min-width:0}
 .overview-page .legend-run-context{margin-left:auto;text-align:right;font-size:13px;font-weight:400;color:#536475;overflow-wrap:anywhere}
 .overview-page>.overview-table{flex:1;min-height:0;max-height:none;margin:0;overflow:auto}
-@media(max-width:800px){body.overview-page{padding:10px}.overview-page>h2{font-size:20px}.overview-page .legend-run-context{flex-basis:100%}}
+@media(max-width:800px){body.overview-page{padding:10px}.overview-page .report-header h2{font-size:20px}.overview-page .legend-run-context{flex-basis:100%}}
 </style>
 '@
 }
@@ -485,7 +540,7 @@ function ReportLegend($fileZoneName,$databaseZoneName,[double]$timestampToleranc
 <section class="legend-card"><h3><span class="legend-number">5</span>DB row duplicates &mdash; is piece data repeated?</h3><ul><li><span class="legend-key">Affected trusses:</span> DB trusses containing repeated piece data.</li><li><span class="legend-key">Extra piece rows:</span> repetitions beyond the first copy. Three identical rows count as two extra rows.</li><li>Counts cover all DB trusses in the project, including trusses missing from the csdproj.</li></ul><div class="legend-tags"><span class="legend-tag error">Red: suspected duplicates found</span></div><p>These counts refer to suspected duplicate piece rows within a DB truss, not duplicates across every DB table. They are candidates for review, not confirmed errors. The project page shows the matching records and their identifiers.</p><details><summary>What makes two piece rows a suspected duplicate?</summary><ul><li>They belong to the same DB truss (ComponentKey), and all stored business values match exactly: geometry, engineering label, lumber/pricing references, dimensions, lengths, plies and calculated footage/cost values.</li><li>Record IDs and creation/modification dates and users are excluded from matching.</li><li>Comparisons are case-sensitive and use no numeric tolerance. Pieces with differing business values are not counted.</li><li>Counts identify distinct truss component IDs and repeat for each archive of the same DB project. Legitimate repetitions require manual review.</li><li>Missing/ambiguous DB projects or a failed piece query produce unavailable counts, not zero duplicates.</li></ul></details></section>
 <section class="legend-card"><h3><span class="legend-number">6</span>Timestamps &mdash; which date is earlier?</h3><ul><li><span class="legend-key">Older:</span> the JSON timestamp inside the csdproj is earlier than the DB truss timestamp by more than $secondsLabel seconds.</li><li><span class="legend-key">Close:</span> the two timestamps are within $secondsLabel seconds.</li><li><span class="legend-key">Newer:</span> the JSON timestamp is later than the DB truss timestamp by more than $secondsLabel seconds.</li><li><span class="legend-key">Minimum / maximum difference:</span> the smallest / largest signed JSON-minus-DB time gap. <b>&minus;2d</b> means two days earlier; <b>+2d</b> means two days later.</li></ul><div class="legend-tags"><span class="legend-tag older">Amber: older</span><span class="legend-tag close">Green: close</span><span class="legend-tag newer">Blue: newer</span><span class="legend-tag mixed">Purple: both older and newer</span><span class="legend-tag unknown">Gray: unavailable</span></div><p>Dates are investigation clues. They do not prove an older/newer truss version or explain the cause of a difference.</p><details><summary>Timestamp comparison rules</summary><ul><li>These counts cover matched trusses only and compare ZIP-entry JSON timestamps with <code>ComponentTruss.LastModifiedDateTime</code>, not the outer csdproj file's save date.</li><li>Timestamp counts overlap field-comparison counts. Purple in Status means some matched JSON timestamps are older and others are newer.</li><li>Missing JSON, missing DB times, or ambiguous/invalid daylight-saving times make the comparison unavailable.</li><li>Signed difference colors indicate earlier/later even within tolerance. Processing errors take priority over timestamp hints.</li><li>Packaging can affect how timestamps are represented. Review the original archive metadata before using dates as root-cause evidence.</li></ul></details></section>
 <section class="legend-card"><h3><span class="legend-number">7</span>Review markers &mdash; a separate review check</h3><ul><li><span class="legend-key">Review markers differ:</span> matched trusses whose CSEngineer review/sealing marker differs between JSON and the DB.</li><li>This marker is assigned by the external review program. It is not the file checksum and does not by itself establish a design difference.</li></ul><details><summary>Technical field</summary><p>The value compared is <code>TrussMatchCode</code>. Marker-only differences are counted in the summary but excluded from the main difference detail list.</p></details></section>
-<section class="legend-card"><h3><span class="legend-number">8</span>Status and unresolved comparisons &mdash; what needs review?</h3><ul><li><span class="legend-key">Status:</span> reports inventory/field/file agreement alongside a separate BDFT result, and highlights missing trusses, processing problems and timestamp direction. Several messages may appear together.</li><li><span class="legend-key">Unresolved comparisons:</span> trusses that could not be compared reliably. These are not confirmed data differences.</li><li><span class="legend-key">Unavailable / Unknown:</span> insufficient information to complete that check. This does not mean the values agree.</li></ul><details><summary>Common reasons and overview sections</summary><ul><li>Duplicate JSON/tdlTruss names, multiple matching DB trusses or project records, missing required JSON, or no usable checked fields can leave a comparison unresolved.</li><li>Parsing and processing errors are reported separately. Review the project page for the reason.</li><li><b>Results:</b> projects with comparison data or issues.</li><li><b>Project not in DB:</b> no DB project matches the folder's identifier, even if the file counts are zero.</li><li><b>Empty:</b> projects with no trusses to compare.</li></ul></details></section>
+<section class="legend-card"><h3><span class="legend-number">8</span>Status and unresolved comparisons &mdash; what needs review?</h3><ul><li><span class="legend-key">Status:</span> reports inventory/field/file agreement alongside a separate BDFT result, and highlights missing trusses, processing problems and timestamp direction. Several messages may appear together.</li><li><span class="legend-key">Unresolved comparisons:</span> trusses that could not be compared reliably. These are not confirmed data differences.</li><li><span class="legend-key">Unavailable / Unknown:</span> insufficient information to complete that check. This does not mean the values agree.</li></ul><details><summary>Common reasons and overview sections</summary><ul><li>Duplicate JSON/tdlTruss names, multiple matching DB trusses or project records, missing required JSON, or no usable checked fields can leave a comparison unresolved.</li><li>Parsing and processing errors are reported separately. Review the project page for the reason.</li><li><b>Results:</b> projects with comparison data or issues.</li><li><b>Project not in DB:</b> no DB project matches the folder's identifier, even if the file counts are zero.</li><li><b>Possibly Legacy [2024.r7]:</b> no truss JSON and known project/truss/piece database modification dates on or before the configured cutoff. Yellow rows are excluded from comparison because pre-2024.r7 values lived in the database. The actual customer upgrade date is unknown; this is an inference, not a verified version check. Newer or undated projects without JSON remain unresolved.</li><li><b>Empty:</b> projects with no trusses to compare.</li><li><b>DB projects without csdproj:</b> database projects with no eligible archive under the scanned root, listed after Empty and sorted by DB project modification time. This check uses the full archive inventory to identify missing files, respects -ProjectId, and fills only remaining -Limit slots after archive projects are exhausted.</li></ul></details></section>
 </div>
 <p><b>Report rows:</b> each row represents one project and one csdproj archive. Multiple archives for a project stay separate to preserve their saved states. Click a project name to open its details.</p><div class="legend-foot"><span><b>0</b> = an actual count of zero</span><span><b>&mdash;</b> = unavailable or no comparison could be made</span><span>Open a project to review the supporting details.</span></div>
 <details class="legend-settings"><summary>Technical settings for this run</summary><ul><li>Timestamp tolerance: <b>$secondsLabel seconds</b>.</li><li>Numeric field tolerance: <code>$numberLabel</code>.</li><li>csdproj JSON timestamp timezone: <b>$fileLabel</b>.</li><li>DB timestamp timezone: <b>$databaseLabel</b>.</li><li>Both timezone interpretations default to the machine's current timezone when the script runs. <code>-FileTimeZone</code> and <code>-DatabaseTimeZone</code> can override them independently.</li><li>Processing is read-only. Original csdproj files and DB records are unchanged; DeletedProjects folders and Attachment_/Attachments_ archives are skipped.</li></ul></details>
@@ -502,14 +557,15 @@ function ReportLegend($fileZoneName,$databaseZoneName,[double]$timestampToleranc
  }
  $html
 }
-function SummaryHeader {
+function SummaryHeader([switch]$Overview) {
  $header='<table class="grouped-summary"><thead><tr><th rowspan="3">Project</th><th rowspan="3">csdproj</th><th rowspan="3" class="status-column">Status</th><th colspan="4" style="background:#e3edf7">Truss inventory</th><th colspan="2" style="background:#e8eef0">Field sync comparison</th><th colspan="4" style="background:#e4ecf0">Truss file checksum</th><th colspan="4" style="background:#e6eee1">BDFT comparison</th><th colspan="2" style="background:#f4e6e4">DB row duplicates</th><th colspan="6" style="background:#eee8f6">Timestamps - in both only</th><th rowspan="3">Review markers differ</th><th rowspan="3">Unresolved comparisons</th></tr><tr><th colspan="2" scope="colgroup">csdproj</th><th rowspan="2" scope="col">DB</th><th rowspan="2" scope="col" class="key-inventory">In both</th><th rowspan="2" class="key-data">Same</th><th rowspan="2">Different</th><th rowspan="2" class="key-checksum">Same</th><th rowspan="2">Different</th><th rowspan="2">File Missing</th><th rowspan="2">Not checked</th><th rowspan="2">csdproj</th><th rowspan="2">DB (calculated)</th><th rowspan="2">Difference</th><th rowspan="2">DB (As stored)</th><th rowspan="2">Affected trusses</th><th rowspan="2">Extra piece rows</th><th rowspan="2">Older</th><th rowspan="2">Close</th><th rowspan="2">Newer</th><th rowspan="2">Unavailable</th><th rowspan="2">Minimum difference</th><th rowspan="2">Maximum difference</th></tr><tr><th scope="col">JSON</th><th scope="col">tdlTruss</th></tr></thead><tbody>'
  if(-not $Timestamp){
   $header=$header.Replace('<th colspan="6" style="background:#eee8f6">Timestamps - in both only</th>','').Replace('<th rowspan="2">Older</th><th rowspan="2">Close</th><th rowspan="2">Newer</th><th rowspan="2">Unavailable</th><th rowspan="2">Minimum difference</th><th rowspan="2">Maximum difference</th>','')
  }
+ if($Overview){$header=$header.Replace('<thead><tr>','<thead><tr><th rowspan="3">Last modified<br><small>csdproj: UTC / DB: wall time</small></th>')}
  $header
 }
-function SummaryRow($row,$href='') {
+function SummaryRow($row,$href='',[switch]$Overview) {
  $paired=[int]$row.TdlMatchedNames
  $uncertain=$row.Ambiguous -gt 0 -or $row.Status -match 'errors|incomplete'
  $inventory=if($null -eq $row.TdlTrussCount){@('Unknown','Unknown','Unknown','Unknown')}else{@([int]$row.JsonTrussCount,[int]$row.TdlTrussCount,[int]$row.DbTrussCount,$paired)}
@@ -517,11 +573,28 @@ function SummaryRow($row,$href='') {
  $project=Enc $row.Project
  if($href){$project='<a href="'+(Enc $href)+'">'+$project+'</a>'}
  $status=StatusHtml $row
- if(-not $uncertain -and $paired -eq 0 -and $row.Status -ne 'Project not in DB'){
+ if(-not $row.LegacyPre2024R7 -and -not $uncertain -and $paired -eq 0 -and $row.Status -ne 'Project not in DB'){
   if($row.'Only in csdproj' -gt 0 -or $row.'Only in database' -gt 0){$status='<div class="error" style="padding:5px">No matching truss names - data comparison not possible</div>'+$status}
   else{$status='No trusses in either source'}
  }
- $b=[Text.StringBuilder]::new();$null=$b.Append('<tr><td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td>')
+ $modifiedCell=''
+ if($Overview){$modifiedText=if($null -eq $row.CsdprojLastModifiedUtc){'Unavailable'}else{([datetime]$row.CsdprojLastModifiedUtc).ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)};$modifiedCell='<td style="white-space:nowrap">'+(Enc $modifiedText)+'</td>'}
+ if($row.NoCsdproj){
+  $dbDate=if($null -eq $row.LatestDatabaseModified){'-'}else{([datetime]$row.LatestDatabaseModified).ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)}
+  $dateCell=if($Overview){'<td class="'+$(if($null -eq $row.LatestDatabaseModified){'unknown'}else{''})+'" style="white-space:nowrap" title="DB project last modified (DB wall time)">'+(Enc $dbDate)+'</td>'}else{''}
+  $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$dateCell+'<td>'+$project+'</td><td class="unknown">-</td><td class="status-column unknown">No csdproj found</td>')
+  $remaining=if($Timestamp){24}else{18}
+  for($column=0;$column -lt $remaining;$column++){
+   if($column -eq 2 -and $null -ne $row.DbTrussCount){$null=$b.Append('<td>'+(Enc $row.DbTrussCount)+'</td>')}
+   else{$null=$b.Append('<td class="unknown">-</td>')}
+  }
+  $null=$b.Append('</tr>');return $b.ToString()
+ }
+ if($row.LegacyPre2024R7){
+  $remaining=if($Timestamp){24}else{18}
+  return '<tr class="legacy-warning">'+$modifiedCell+'<td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td><td colspan="'+$remaining+'">Not applicable &mdash; legacy database source of truth</td></tr>'
+ }
+ $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td>')
  for($i=0;$i -lt $inventory.Count;$i++){
   $class=''
   if($i -eq 0 -and $null -ne $row.JsonTrussCount -and $null -ne $row.TdlTrussCount -and $row.JsonTrussCount -ne $row.TdlTrussCount){$class='older'}
@@ -604,6 +677,7 @@ function ConsoleStatsValues($row,[int]$archiveNumber,[int]$archiveTotal,[bool]$i
   $(if($null -ne $row.SameBasisBoardFeetDifference){([decimal]$row.SameBasisBoardFeetDifference).ToString('+0.00;-0.00;0.00',[Globalization.CultureInfo]::InvariantCulture)}else{'-'})
  )
  if($includeTimestamp){$values+= $(if($paired -gt 0){[string]$row.'Older Timestamp'+'/'+$row.'Within tolerance'+'/'+$row.'Newer Timestamp'+'/'+$row.Unavailable}else{'-'})}
+ if($row.LegacyPre2024R7){for($i=2;$i -lt $values.Count;$i++){$values[$i]='-'}}
  $values+= $status
  $values
 }
@@ -633,9 +707,13 @@ function Grid($rows){
 $root=(Get-Item -LiteralPath $ProjectsRoot).FullName.TrimEnd('\')
 $fileZone=$null;if($Timestamp){$fileZone=[TimeZoneInfo]::FindSystemTimeZoneById($FileTimeZone)}
 $dbZone=$null;if($Timestamp){$dbZone=[TimeZoneInfo]::FindSystemTimeZoneById($DatabaseTimeZone)}
+$reportOwner=ReadReportOwner $Server $Database $KeyUpPath
+foreach($ownerNote in $reportOwner.Notes){Write-Warning $ownerNote}
 $out=[IO.Path]::GetFullPath($OutputDirectory)
-$runId=(Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
-$out=$out.TrimEnd('\','/')+'-'+$runId
+$reportCreatedUtc=(Get-Date).ToUniversalTime()
+$runId=$reportCreatedUtc.ToString('yyyyMMddTHHmmssfffZ')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
+$out=$out.TrimEnd('\','/')+'-'+(CompanyFolderName $reportOwner.CompanyName)+'-'+$runId
+$out=Join-Path ([IO.Path]::GetDirectoryName($out)) ([IO.Path]::GetFileName($out).ToLowerInvariant())
 $run=$out
 $pages=Join-Path $run 'projects'
 $null=New-Item -ItemType Directory -Path $pages -Force
@@ -651,6 +729,8 @@ $style='<style>body{font:14px Segoe UI,Arial;color:#243348;background:#f5f7fa;ma
 .grouped-summary thead tr:first-child th{height:44px;box-sizing:border-box}
 .grouped-summary thead tr:nth-child(2) th{top:44px;z-index:2}.grouped-summary thead tr:nth-child(3) th{top:88px;z-index:2}.grouped-summary .status-column{min-width:200px;box-sizing:border-box}
 .grouped-summary thead th[rowspan]{z-index:4;vertical-align:middle}body{margin:16px}.overview-table{max-height:82vh}.section-divider td{background:#33465c;color:white;font-weight:700;text-align:left;padding:10px 12px;border-color:#33465c}.scroll th.key-inventory,th.key-inventory,.scroll th.key-data,th.key-data,.scroll th.key-checksum,th.key-checksum{background:#111111;color:#ffffff;font-weight:700;box-shadow:inset 0 -3px 0 #111111}</style>'
+$style+='<style>tr.legacy-warning>td{background:#fff2cc;color:#664d03}tr.legacy-warning small{color:#664d03}</style>'
+$style+='<style>.report-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px 24px;flex-wrap:wrap;flex-shrink:0}.report-header h1,.report-header h2{margin:0}.report-owner{margin-left:auto;text-align:end;overflow-wrap:anywhere;max-width:100%}.report-owner strong{font-size:16px}.report-owner div{margin-top:4px;color:#536475}</style>'
 $style+=(ReportLegendStyle)
 $legend=ReportLegend $FileTimeZone $DatabaseTimeZone $ToleranceSeconds $NumericTolerance
 $stickyHeaderScript=@'
@@ -660,7 +740,12 @@ function Page($title,$body,$path,[switch]$Overview){
  $heading=if($Overview){'h2'}else{'h1'}
  $bodyAttribute=if($Overview){' class="overview-page"'}else{''}
  $layoutStyle=if($Overview){OverviewStyle}else{''}
- ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+(Enc $title)+'</title>'+$style+$layoutStyle+'</head><body'+$bodyAttribute+'><'+$heading+'>'+(Enc $title)+'</'+$heading+'>'+$body+$stickyHeaderScript+'</body></html>') | Set-Content -LiteralPath $path -Encoding UTF8
+ $headingHtml='<'+$heading+'>'+(Enc $title)+'</'+$heading+'>'
+ $companyLabel=if($reportOwner.CompanyName){$reportOwner.CompanyName}else{'Company unavailable'}
+ $referenceLabel=if($reportOwner.ReferenceNumber){$reportOwner.ReferenceNumber}else{'Unavailable'}
+ $createdLabel=$reportCreatedUtc.ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)+' UTC'
+ $headingHtml='<header class="report-header">'+$headingHtml+'<div class="report-owner"><strong>'+(Enc $companyLabel)+'</strong><div>Server Reference: '+(Enc $referenceLabel)+'</div><div>Report created: '+(Enc $createdLabel)+'</div></div></header>'
+ ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+(Enc $title)+'</title>'+$style+$layoutStyle+'</head><body'+$bodyAttribute+'>'+$headingHtml+$body+$stickyHeaderScript+'</body></html>') | Set-Content -LiteralPath $path -Encoding UTF8
 }
 # Traverse explicitly so excluded directories are never entered.
 $pending=[Collections.Generic.Stack[string]]::new()
@@ -677,7 +762,12 @@ while($pending.Count -gt 0){
 $archives=@($found | Sort-Object FullName)
 $groups=@{}
 foreach($a in $archives){$rel=$a.FullName.Substring($root.Length).TrimStart('\');$parts=$rel -split '[\\/]';$id=if($parts.Count -gt 1){$parts[0]}else{'[No project folder]'};if($ProjectId -and $id -notin $ProjectId){continue};$groups[$id]=@($groups[$id] | Where-Object {$null -ne $_})+@($a)}
-$selectedIds=@($groups.Keys | Sort-Object)
+# Rank each project by its newest eligible archive before applying the project limit.
+$projectModified=@{}
+foreach($projectKey in $groups.Keys){
+ $projectModified[$projectKey]=($groups[$projectKey] | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).LastWriteTimeUtc
+}
+$selectedIds=@($groups.Keys | Sort-Object @{Expression={$projectModified[$_]};Descending=$true},@{Expression={[string]$_}})
 if($Limit -gt 0){$selectedIds=@($selectedIds | Select-Object -First $Limit)}
 $conn=[Data.SqlClient.SqlConnection]::new()
 $builder=[Data.SqlClient.SqlConnectionStringBuilder]::new();$builder['Data Source']=$Server;$builder['Initial Catalog']=$Database;$builder['Integrated Security']=$true;$builder['Connect Timeout']=15;$conn.ConnectionString=$builder.ConnectionString
@@ -690,7 +780,7 @@ try{
  foreach($id in $selectedIds){
   $projectIndex++;Write-Progress -Id 1 -Activity 'Comparing projects' -Status "[$projectIndex/$($selectedIds.Count)] $id" -PercentComplete (($projectIndex-1)*100/[math]::Max(1,$selectedIds.Count))
   $cmd=$conn.CreateCommand();$cmd.CommandTimeout=60
-  $cmd.CommandText='SELECT EventKey,CachedBoardFeet FROM dbo.Project WHERE ProjectNumber=@p';$null=$cmd.Parameters.Add('@p',[Data.SqlDbType]::NVarChar,256);$cmd.Parameters['@p'].Value=$id
+  $cmd.CommandText='SELECT p.EventKey,p.CachedBoardFeet,e.LastModifiedDateTime AS ProjectModified FROM dbo.Project p LEFT JOIN dbo.Event e ON e.EventKey=p.EventKey WHERE p.ProjectNumber=@p';$null=$cmd.Parameters.Add('@p',[Data.SqlDbType]::NVarChar,256);$cmd.Parameters['@p'].Value=$id
   $pt=[Data.DataTable]::new();$reader=$cmd.ExecuteReader();$pt.Load($reader);$reader.Dispose()
   $cmd.CommandText='SELECT h.Name,h.ComponentHeaderKey,h.TrussFileCheckSum,h.LastModifiedDateTime AS HeaderModified,c.LastModifiedDateTime AS ComponentModified,c.ComponentQuantity,t.* FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber=@p ORDER BY h.Name,h.ComponentHeaderKey'
   $dbt=[Data.DataTable]::new();$reader=$cmd.ExecuteReader();$dbt.Load($reader);$reader.Dispose()
@@ -718,7 +808,6 @@ try{
   $cmd.Dispose()
   $dbLookup=@{};foreach($db in $dbt.Rows){$dbLookup[$db.Name]=@($dbLookup[$db.Name])+@($db)}
   $projectBody=[Text.StringBuilder]::new();$null=$projectBody.Append('<p><a href="../index.html">Back to all projects</a></p>'+$legend)
-  $null=$projectBody.Append((DuplicatePieceDetails $duplicates))
   $pageName=$id+'.html'
   $projectSummaries=[Collections.Generic.List[object]]::new();$archiveIndex=0
   foreach($archive in $groups[$id]){
@@ -807,7 +896,7 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    if($errors.Count){$bdft.Total=$null;$bdft.Note='Incomplete archive processing; estimate withheld'}
    $reconciliation=ReconcileBoardFeet $bdft $pieceTable $duplicates $dbt.Rows $dbBdft $databaseMode
    $bfDelta=if($null -ne $bdft.Total -and $null -ne $dbBdft){$bdft.Total-[decimal]$dbBdft}else{$null}
-   $s=[pscustomobject][ordered]@{Project=$id;csdproj=$archive.Name;Status=$status;JsonTrussCount=$count.JsonTrusses;TdlTrussCount=$tdlCount;DbTrussCount=$dbt.Rows.Count;TdlMatchedNames=$tdlMatched;'Data synced'=$count.Synced;'Data differs'=$count.Differs;ChecksumSame=@($checksums | Where-Object Result -eq 'Same file').Count;ChecksumDifferent=@($checksums | Where-Object Result -eq 'Different file').Count;ChecksumMissing=@($checksums | Where-Object Result -eq 'Missing file').Count;ChecksumUnavailable=if($checksums.Count){@($checksums | Where-Object Result -eq 'Unavailable').Count}else{$dbt.Rows.Count};CsdprojBoardFeet=$bdft.Total;DatabaseBoardFeet=$dbBdft;BoardFeetDifference=$bfDelta;DuplicateAffectedTrusses=$duplicates.AffectedTrusses;DuplicateExtraPieceRows=$duplicates.ExtraPieceRows;'Only in csdproj'=$count.OnlyFile;'Only in database'=$count.OnlyDb;'Review marker differs'=$count.Marker;'Older Timestamp'=$count.Older;'Within tolerance'=$count.Close;'Newer Timestamp'=$count.Newer;Unavailable=$count.Unavailable;'Minimum difference'=SignedTime $min;'Maximum difference'=SignedTime $max;Ambiguous=$count.Ambiguous}
+   $s=[pscustomobject][ordered]@{Project=$id;csdproj=$archive.Name;CsdprojLastModifiedUtc=$archive.LastWriteTimeUtc;Status=$status;JsonTrussCount=$count.JsonTrusses;TdlTrussCount=$tdlCount;DbTrussCount=$dbt.Rows.Count;TdlMatchedNames=$tdlMatched;'Data synced'=$count.Synced;'Data differs'=$count.Differs;ChecksumSame=@($checksums | Where-Object Result -eq 'Same file').Count;ChecksumDifferent=@($checksums | Where-Object Result -eq 'Different file').Count;ChecksumMissing=@($checksums | Where-Object Result -eq 'Missing file').Count;ChecksumUnavailable=if($checksums.Count){@($checksums | Where-Object Result -eq 'Unavailable').Count}else{$dbt.Rows.Count};CsdprojBoardFeet=$bdft.Total;DatabaseBoardFeet=$dbBdft;BoardFeetDifference=$bfDelta;DuplicateAffectedTrusses=$duplicates.AffectedTrusses;DuplicateExtraPieceRows=$duplicates.ExtraPieceRows;'Only in csdproj'=$count.OnlyFile;'Only in database'=$count.OnlyDb;'Review marker differs'=$count.Marker;'Older Timestamp'=$count.Older;'Within tolerance'=$count.Close;'Newer Timestamp'=$count.Newer;Unavailable=$count.Unavailable;'Minimum difference'=SignedTime $min;'Maximum difference'=SignedTime $max;Ambiguous=$count.Ambiguous}
    if(-not $Timestamp){foreach($name in @('Older Timestamp','Within tolerance','Newer Timestamp','Unavailable','Minimum difference','Maximum difference')){$s.PSObject.Properties.Remove($name)}}
    $fileBasisComparison=CompareBoardFeetOnFileBasis $bdft $formulaPieceTable $dbt.Rows $databaseMode
    if($formulaQueryError){$fileBasisComparison.Note+=' SQL material query: '+$formulaQueryError}
@@ -822,12 +911,25 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    $s | Add-Member -NotePropertyName BoardFeetQuantityDifferences -NotePropertyValue $fileBasisComparison.QuantityDifferences
    $s | Add-Member -NotePropertyName BoardFeetSettingsDifferent -NotePropertyValue $fileBasisComparison.SettingsDifferent
    $s | Add-Member -NotePropertyName SameBasisBoardFeetNote -NotePropertyValue $fileBasisComparison.Note
+   $legacy=LegacyAssessment $pt $dbt.Rows $pieceTable ($errors.Count -eq 0 -and $null -ne $tdlCount) $count.JsonTrusses $LegacyCutoffDate
+   $s | Add-Member -NotePropertyName LegacyPre2024R7 -NotePropertyValue $legacy.IsLegacy
+   $s | Add-Member -NotePropertyName LegacyReason -NotePropertyValue $legacy.Reason
+   $s | Add-Member -NotePropertyName LatestDatabaseModified -NotePropertyValue $legacy.LatestDatabaseModified
+   if($legacy.IsLegacy){
+    $s.Status='Possibly Legacy [2024.r7]'
+    # Suppress numeric comparison outcomes in JSON as well as the HTML/console.
+    foreach($property in @($s.PSObject.Properties.Name)){
+     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','LegacyPre2024R7','LegacyReason','LatestDatabaseModified')){$s.$property=$null}
+    }
+   }
    $dataChecksHealthy=HealthyProject $s
    $s | Add-Member -NotePropertyName DataChecksHealthy -NotePropertyValue $dataChecksHealthy
-   $s | Add-Member -NotePropertyName BoardFeetStatus -NotePropertyValue (BoardFeetStatus $s)
+   $s | Add-Member -NotePropertyName BoardFeetStatus -NotePropertyValue $(if($legacy.IsLegacy){'Not applicable (legacy)'}else{BoardFeetStatus $s})
    $s | Add-Member -NotePropertyName Healthy -NotePropertyValue ($dataChecksHealthy -and $s.BoardFeetStatus -eq 'BDFT agrees' -and $null -ne $s.DuplicateExtraPieceRows -and $s.DuplicateExtraPieceRows -eq 0)
    if($dataChecksHealthy){$s.Status=if($s.Healthy){'Healthy'}else{'Data matches; '+$s.BoardFeetStatus}}
    $allSummary.Add($s);$projectSummaries.Add($s);$links.Add([pscustomobject]@{Summary=$s;Page=$pageName})
+   if(-not $legacy.IsLegacy){
+   $null=$projectBody.Append((DuplicatePieceDetails $duplicates))
    $null=$projectBody.Append('<h2>'+(Enc $archive.Name)+'</h2><div class="scroll">'+(SummaryTable @($s))+'</div><p><b>BDFT:</b> '+(Enc $bdft.Note)+'</p><p>Other JSON: '+$count.Other+'; skipped field comparisons: '+$count.Skipped+'.</p><details><summary>Source evidence</summary><p>'+(Enc $archive.FullName)+'<br>SHA-256: '+$hash+'</p></details>')
    $null=$projectBody.Append((BoardFeetDetails $bdft $reconciliation $dbBdft $basisEvidence $fileBasisComparison))
    $s | Add-Member -NotePropertyName DatabaseLengthMode -NotePropertyValue $databaseMode
@@ -843,11 +945,36 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    $checksumExceptions=@($checksums | Where-Object Result -ne 'Same file')
    $null=$projectBody.Append('<details><summary><b>Truss file checksum exceptions ('+$checksumExceptions.Count+')</b></summary><p>MD5 of individual uncompressed canonical .tdlTruss files versus ComponentHeader.TrussFileCheckSum. Matches are counted in the summary. This is separate from JSON field comparison.</p>'+(Grid $checksumExceptions)+'</details>')
    foreach($row in $rows){if($row.Status -in @('Other JSON','Retained JSON without tdlTruss') -or ($row.Status -eq 'Data synced' -and @($row.FileChecksum | Where-Object Result -ne 'Same file').Count -eq 0)){continue};$null=$projectBody.Append('<details class="'+$(if($row.Status -eq 'Only in database'){'error'}else{''})+'"><summary><b>'+(Enc $row.Truss)+'</b> &mdash; '+(Enc $row.Status)+'</summary><p>'+(Enc $row.Entry)+'</p>');if($row.FileChecksum.Count){$null=$projectBody.Append((Grid $row.FileChecksum));if($row.Differences.Count -gt 0 -and @($row.FileChecksum | Where-Object Result -eq 'Same file').Count -gt 0){$null=$projectBody.Append('<p class="notice"><b>File checksum agrees, but checked JSON/DB fields differ.</b> The stored file checksum does not establish consistency of related database data.</p>')}};if($row.Differences.Count){$null=$projectBody.Append((Grid $row.Differences))};$null=$projectBody.Append('<p>CSEngineer TrussMatchCode<br>csdproj: <code>'+(Enc $row.FileMatchCode)+'</code><br>Database: <code>'+(Enc $row.DbMatchCode)+'</code></p>');if($Timestamp -and $row.Timestamps.Count){$null=$projectBody.Append((Grid $row.Timestamps))};$null=$projectBody.Append('<p>'+(Enc $row.Error)+'</p></details>')}
-   if($retainEvidence){[pscustomobject]@{ArchiveCalculation=$bdft;DatabaseReconciliation=$reconciliation;SameBasisComparison=$fileBasisComparison} | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'board-feet.json') -Encoding UTF8;$duplicates | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'duplicate-pieces.json') -Encoding UTF8;$checksums | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $archiveWork 'checksums.json') -Encoding UTF8;$rows | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'comparison.json') -Encoding UTF8}
+   }else{
+    $null=$projectBody.Append('<h2>'+(Enc $archive.Name)+'</h2><div class="scroll">'+(SummaryTable @($s))+'</div><p class="notice">'+(Enc $s.LegacyReason)+'</p>')
+   }
+   if($retainEvidence -and -not $legacy.IsLegacy){[pscustomobject]@{ArchiveCalculation=$bdft;DatabaseReconciliation=$reconciliation;SameBasisComparison=$fileBasisComparison} | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'board-feet.json') -Encoding UTF8;$duplicates | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'duplicate-pieces.json') -Encoding UTF8;$checksums | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $archiveWork 'checksums.json') -Encoding UTF8;$rows | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'comparison.json') -Encoding UTF8}
    Write-Progress -Id 2 -Activity $archive.Name -Completed
    WriteConsoleStatsRow $consoleStatsColumns $s $archiveIndex $groups[$id].Count ([bool]$Timestamp)
   }
   Page $id $projectBody.ToString() (Join-Path $pages $pageName)
+ }
+ # Compare DB projects with the complete eligible archive inventory, not the limited selection.
+ if($Limit -eq 0 -or $selectedIds.Count -lt $Limit){
+ $missingArchiveAdded=0
+ $missingArchiveCommand=$conn.CreateCommand();$missingArchiveCommand.CommandTimeout=60;$missingArchiveReader=$null
+ try{
+  $missingArchiveCommand.CommandText='SELECT p.EventKey,p.ProjectNumber,e.LastModifiedDateTime AS ProjectModified,COALESCE(tc.TrussCount,0) AS TrussCount FROM dbo.Project p LEFT JOIN dbo.Event e ON e.EventKey=p.EventKey LEFT JOIN (SELECT h.ProjectEventKey,COUNT(*) AS TrussCount FROM dbo.ComponentHeader h JOIN dbo.ComponentTruss t ON t.ComponentKey=h.ComponentHeaderKey GROUP BY h.ProjectEventKey) tc ON tc.ProjectEventKey=p.EventKey ORDER BY e.LastModifiedDateTime DESC,p.ProjectNumber,p.EventKey'
+  $missingArchiveReader=$missingArchiveCommand.ExecuteReader();$databaseProjects=[Data.DataTable]::new();$databaseProjects.Load($missingArchiveReader)
+  foreach($dbProject in $databaseProjects.Rows){
+   if($Limit -gt 0 -and ($selectedIds.Count+$missingArchiveAdded) -ge $Limit){break}
+   $number=[string]$dbProject.ProjectNumber
+   if($ProjectId -and $number -notin $ProjectId){continue}
+   if($groups.ContainsKey($number)){continue}
+   $displayNumber=if([string]::IsNullOrWhiteSpace($number)){'[No project number]'}else{$number}
+   $missingSummary=[pscustomobject][ordered]@{Project=$displayNumber;ProjectEventKey=[string]$dbProject.EventKey;csdproj=$null;CsdprojLastModifiedUtc=$null;Status='No csdproj found';NoCsdproj=$true;DbTrussCount=[int]$dbProject.TrussCount;LatestDatabaseModified=if($dbProject.ProjectModified -is [DBNull]){$null}else{$dbProject.ProjectModified};Healthy=$false}
+   $missingPage='db-'+([guid]$dbProject.EventKey).ToString('N')+'.html'
+   $allSummary.Add($missingSummary);$links.Add([pscustomobject]@{Summary=$missingSummary;Page=$missingPage})
+   $missingBody='<p><a href="../index.html">Back to all projects</a></p><p class="notice">No eligible csdproj archive was found under '+(Enc $root)+'. DeletedProjects, directory reparse points and Attachment_/Attachments_ archives are excluded from the scan. This does not establish whether an archive exists elsewhere.</p><div class="scroll">'+(SummaryTable @($missingSummary))+'</div><p>DB project ID: '+(Enc $dbProject.EventKey)+'</p>'
+   Page $displayNumber $missingBody (Join-Path $pages $missingPage)
+   $missingArchiveAdded++
+  }
+ }finally{if($missingArchiveReader){$missingArchiveReader.Dispose()};$missingArchiveCommand.Dispose()}
  }
 }finally{
  $conn.Dispose()
@@ -863,25 +990,27 @@ $numericColumns=@('Data synced','Data differs','Only in csdproj','Only in databa
 $normalLinks=[Collections.Generic.List[object]]::new()
 $emptyLinks=[Collections.Generic.List[object]]::new()
 $missingDbLinks=[Collections.Generic.List[object]]::new()
+$legacyLinks=[Collections.Generic.List[object]]::new()
+$missingArchiveLinks=[Collections.Generic.List[object]]::new()
 foreach($link in $links){
  $isEmpty=$link.Summary.Status -eq 'Compared'
  foreach($col in $numericColumns){if($link.Summary.$col -ne 0){$isEmpty=$false}}
- if($link.Summary.Status -eq 'Project not in DB'){$missingDbLinks.Add($link)}elseif($isEmpty){$emptyLinks.Add($link)}else{$normalLinks.Add($link)}
+ if($link.Summary.NoCsdproj){$missingArchiveLinks.Add($link)}elseif($link.Summary.LegacyPre2024R7){$legacyLinks.Add($link)}elseif($link.Summary.Status -eq 'Project not in DB'){$missingDbLinks.Add($link)}elseif($isEmpty){$emptyLinks.Add($link)}else{$normalLinks.Add($link)}
 }
 $columns=if($allSummary.Count){@($allSummary[0].PSObject.Properties.Name)}else{@()}
-$null=$table.Append('<div class="scroll overview-table">'+(SummaryHeader))
-foreach($section in @('Results','Project not in DB','Empty')){
- $sectionLinks=if($section -eq 'Results'){$normalLinks}elseif($section -eq 'Project not in DB'){$missingDbLinks}else{$emptyLinks}
- $summaryColumnCount=if($Timestamp){27}else{21}
+$null=$table.Append('<div class="scroll overview-table">'+(SummaryHeader -Overview))
+foreach($section in @('Results','Project not in DB','Possibly Legacy [2024.r7]','Empty','DB projects without csdproj')){
+ $sectionLinks=if($section -eq 'Results'){$normalLinks}elseif($section -eq 'Project not in DB'){$missingDbLinks}elseif($section -eq 'Possibly Legacy [2024.r7]'){$legacyLinks}elseif($section -eq 'DB projects without csdproj'){$missingArchiveLinks}else{$emptyLinks}
+ $summaryColumnCount=if($Timestamp){28}else{22}
  $null=$table.Append('<tr class="section-divider"><td colspan="'+$summaryColumnCount+'">'+$section+' ('+$sectionLinks.Count+')</td></tr>')
- foreach($link in $sectionLinks){$null=$table.Append((SummaryRow $link.Summary ('projects/'+[uri]::EscapeDataString($link.Page))))}
+ foreach($link in @($sectionLinks | Sort-Object @{Expression={if($_.Summary.NoCsdproj){$_.Summary.LatestDatabaseModified}else{$_.Summary.CsdprojLastModifiedUtc}};Descending=$true},@{Expression={$_.Summary.Project}},@{Expression={$_.Summary.csdproj}})){$null=$table.Append((SummaryRow $link.Summary ('projects/'+[uri]::EscapeDataString($link.Page)) -Overview))}
 }
 $null=$table.Append('</tbody></table></div>')
-$context='{0} projects; {1} csdproj archives. {2} / {3}.' -f $selectedIds.Count,$allSummary.Count,$Server,$Database
+$context='{0} archive projects; {1} csdproj archives; {4} DB projects without csdproj. {2} / {3}.' -f $selectedIds.Count,($allSummary.Count-$missingArchiveLinks.Count),$Server,$Database,$missingArchiveLinks.Count
 $indexLegend=ReportLegend $FileTimeZone $DatabaseTimeZone $ToleranceSeconds $NumericTolerance ([bool]$Timestamp) $context
 Page 'CSDirector: Database and Project file Sync Report' ($indexLegend+$table.ToString()) (Join-Path $out 'index.html') -Overview
 $allSummary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'summary.json') -Encoding UTF8
-[pscustomobject]@{Run=$runId;Source=$root;Server=$Server;Database=$Database;FileTimeZone=$FileTimeZone;DatabaseTimeZone=$DatabaseTimeZone;ToleranceSeconds=$ToleranceSeconds;NumericTolerance=$NumericTolerance;Fields=$map;RetainEvidence=$retainEvidence;Timestamp=[bool]$Timestamp} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'settings.json') -Encoding UTF8
+[pscustomobject]@{Run=$runId;ReportCreatedUtc=$reportCreatedUtc;Owner=$reportOwner;Source=$root;Server=$Server;Database=$Database;FileTimeZone=$FileTimeZone;DatabaseTimeZone=$DatabaseTimeZone;ToleranceSeconds=$ToleranceSeconds;NumericTolerance=$NumericTolerance;Fields=$map;RetainEvidence=$retainEvidence;LegacyCutoffDate=$LegacyCutoffDate.Date;Timestamp=[bool]$Timestamp} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'settings.json') -Encoding UTF8
 Write-Progress -Id 2 -Activity 'Files' -Completed
 Write-Progress -Id 1 -Activity 'Projects' -Completed
 $reportPath=Join-Path $out 'index.html'
