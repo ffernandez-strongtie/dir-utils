@@ -579,20 +579,25 @@ function SummaryRow($row,$href='',[switch]$Overview) {
  }
  $modifiedCell=''
  if($Overview){$modifiedText=if($null -eq $row.CsdprojLastModifiedUtc){'Unavailable'}else{([datetime]$row.CsdprojLastModifiedUtc).ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)};$modifiedCell='<td style="white-space:nowrap">'+(Enc $modifiedText)+'</td>'}
- if($row.NoCsdproj){
-  $dbDate=if($null -eq $row.LatestDatabaseModified){'-'}else{([datetime]$row.LatestDatabaseModified).ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)}
-  $dateCell=if($Overview){'<td class="'+$(if($null -eq $row.LatestDatabaseModified){'unknown'}else{''})+'" style="white-space:nowrap" title="DB project last modified (DB wall time)">'+(Enc $dbDate)+'</td>'}else{''}
-  $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$dateCell+'<td>'+$project+'</td><td class="unknown">-</td><td class="status-column unknown">No csdproj found</td>')
-  $remaining=if($Timestamp){24}else{18}
-  for($column=0;$column -lt $remaining;$column++){
-   if($column -eq 2 -and $null -ne $row.DbTrussCount){$null=$b.Append('<td>'+(Enc $row.DbTrussCount)+'</td>')}
-   else{$null=$b.Append('<td class="unknown">-</td>')}
+ if($row.NoCsdproj -or $row.LegacyPre2024R7){
+  if($row.NoCsdproj){
+   $dbDate=if($null -eq $row.LatestDatabaseModified){'-'}else{([datetime]$row.LatestDatabaseModified).ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)}
+   $modifiedCell=if($Overview){'<td style="white-space:nowrap" title="DB project last modified (DB wall time)">'+(Enc $dbDate)+'</td>'}else{''}
+  }
+  $archiveCell=if($row.NoCsdproj){'<td class="unknown">-</td>'}else{'<td>'+(Enc $row.csdproj)+'</td>'}
+  $statusCell=if($row.LegacyPre2024R7){'<td class="status-column notice">'+(StatusHtml $row)+'</td>'}else{'<td class="status-column unknown">No csdproj found</td>'}
+  $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td>'+$archiveCell+$statusCell)
+  $columns=@('JsonTrussCount','TdlTrussCount','DbTrussCount','TdlMatchedNames','Data synced','Data differs','ChecksumSame','ChecksumDifferent','ChecksumMissing','ChecksumUnavailable','CsdprojBoardFeet','DatabaseOnFileBasisBoardFeet','SameBasisBoardFeetDifference','DatabaseBoardFeet','DuplicateAffectedTrusses','DuplicateExtraPieceRows')
+  if($Timestamp){$columns+=@('Older Timestamp','Within tolerance','Newer Timestamp','Unavailable','Minimum difference','Maximum difference')}
+  $columns+=@('Review marker differs','Ambiguous')
+  foreach($column in $columns){
+   $value=$row.$column
+   if($null -eq $value -or ($column -eq 'JsonTrussCount' -and $value -eq 0)){$null=$b.Append('<td class="unknown">-</td>');continue}
+   $display=if($column -eq 'DatabaseBoardFeet'){FormatBoardFeet $value $row.DatabaseBoardFeetBasis}else{$value}
+   $class=if($column -in @('DuplicateAffectedTrusses','DuplicateExtraPieceRows') -and $value -gt 0){'error'}else{''}
+   $null=$b.Append('<td class="'+$class+'">'+(Enc $display)+'</td>')
   }
   $null=$b.Append('</tr>');return $b.ToString()
- }
- if($row.LegacyPre2024R7){
-  $remaining=if($Timestamp){24}else{18}
-  return '<tr class="legacy-warning">'+$modifiedCell+'<td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td><td colspan="'+$remaining+'">Not applicable &mdash; legacy database source of truth</td></tr>'
  }
  $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td>')
  for($i=0;$i -lt $inventory.Count;$i++){
@@ -677,7 +682,7 @@ function ConsoleStatsValues($row,[int]$archiveNumber,[int]$archiveTotal,[bool]$i
   $(if($null -ne $row.SameBasisBoardFeetDifference){([decimal]$row.SameBasisBoardFeetDifference).ToString('+0.00;-0.00;0.00',[Globalization.CultureInfo]::InvariantCulture)}else{'-'})
  )
  if($includeTimestamp){$values+= $(if($paired -gt 0){[string]$row.'Older Timestamp'+'/'+$row.'Within tolerance'+'/'+$row.'Newer Timestamp'+'/'+$row.Unavailable}else{'-'})}
- if($row.LegacyPre2024R7){for($i=2;$i -lt $values.Count;$i++){$values[$i]='-'}}
+ if($row.LegacyPre2024R7){for($i=2;$i -lt $values.Count;$i++){if($i -notin @(3,4,8)){$values[$i]='-'}}}
  $values+= $status
  $values
 }
@@ -919,7 +924,7 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
     $s.Status='Possibly Legacy [2024.r7]'
     # Suppress numeric comparison outcomes in JSON as well as the HTML/console.
     foreach($property in @($s.PSObject.Properties.Name)){
-     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','LegacyPre2024R7','LegacyReason','LatestDatabaseModified')){$s.$property=$null}
+     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','LegacyPre2024R7','LegacyReason','LatestDatabaseModified','JsonTrussCount','TdlTrussCount','DbTrussCount','DatabaseBoardFeet','DatabaseBoardFeetBasis','DatabasePieceBoardFeetBasis','BoardFeetBasisNote','DuplicateAffectedTrusses','DuplicateExtraPieceRows')){$s.$property=$null}
     }
    }
    $dataChecksHealthy=HealthyProject $s
@@ -947,6 +952,7 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    foreach($row in $rows){if($row.Status -in @('Other JSON','Retained JSON without tdlTruss') -or ($row.Status -eq 'Data synced' -and @($row.FileChecksum | Where-Object Result -ne 'Same file').Count -eq 0)){continue};$null=$projectBody.Append('<details class="'+$(if($row.Status -eq 'Only in database'){'error'}else{''})+'"><summary><b>'+(Enc $row.Truss)+'</b> &mdash; '+(Enc $row.Status)+'</summary><p>'+(Enc $row.Entry)+'</p>');if($row.FileChecksum.Count){$null=$projectBody.Append((Grid $row.FileChecksum));if($row.Differences.Count -gt 0 -and @($row.FileChecksum | Where-Object Result -eq 'Same file').Count -gt 0){$null=$projectBody.Append('<p class="notice"><b>File checksum agrees, but checked JSON/DB fields differ.</b> The stored file checksum does not establish consistency of related database data.</p>')}};if($row.Differences.Count){$null=$projectBody.Append((Grid $row.Differences))};$null=$projectBody.Append('<p>CSEngineer TrussMatchCode<br>csdproj: <code>'+(Enc $row.FileMatchCode)+'</code><br>Database: <code>'+(Enc $row.DbMatchCode)+'</code></p>');if($Timestamp -and $row.Timestamps.Count){$null=$projectBody.Append((Grid $row.Timestamps))};$null=$projectBody.Append('<p>'+(Enc $row.Error)+'</p></details>')}
    }else{
     $null=$projectBody.Append('<h2>'+(Enc $archive.Name)+'</h2><div class="scroll">'+(SummaryTable @($s))+'</div><p class="notice">'+(Enc $s.LegacyReason)+'</p>')
+    $null=$projectBody.Append((DuplicatePieceDetails $duplicates))
    }
    if($retainEvidence -and -not $legacy.IsLegacy){[pscustomobject]@{ArchiveCalculation=$bdft;DatabaseReconciliation=$reconciliation;SameBasisComparison=$fileBasisComparison} | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'board-feet.json') -Encoding UTF8;$duplicates | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'duplicate-pieces.json') -Encoding UTF8;$checksums | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $archiveWork 'checksums.json') -Encoding UTF8;$rows | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath (Join-Path $archiveWork 'comparison.json') -Encoding UTF8}
    Write-Progress -Id 2 -Activity $archive.Name -Completed
@@ -959,7 +965,7 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
  $missingArchiveAdded=0
  $missingArchiveCommand=$conn.CreateCommand();$missingArchiveCommand.CommandTimeout=60;$missingArchiveReader=$null
  try{
-  $missingArchiveCommand.CommandText='SELECT p.EventKey,p.ProjectNumber,e.LastModifiedDateTime AS ProjectModified,COALESCE(tc.TrussCount,0) AS TrussCount FROM dbo.Project p LEFT JOIN dbo.Event e ON e.EventKey=p.EventKey LEFT JOIN (SELECT h.ProjectEventKey,COUNT(*) AS TrussCount FROM dbo.ComponentHeader h JOIN dbo.ComponentTruss t ON t.ComponentKey=h.ComponentHeaderKey GROUP BY h.ProjectEventKey) tc ON tc.ProjectEventKey=p.EventKey ORDER BY e.LastModifiedDateTime DESC,p.ProjectNumber,p.EventKey'
+  $missingArchiveCommand.CommandText='SELECT p.EventKey,p.ProjectNumber,p.CachedBoardFeet,e.LastModifiedDateTime AS ProjectModified,COALESCE(tc.TrussCount,0) AS TrussCount FROM dbo.Project p LEFT JOIN dbo.Event e ON e.EventKey=p.EventKey LEFT JOIN (SELECT h.ProjectEventKey,COUNT(*) AS TrussCount FROM dbo.ComponentHeader h JOIN dbo.ComponentTruss t ON t.ComponentKey=h.ComponentHeaderKey GROUP BY h.ProjectEventKey) tc ON tc.ProjectEventKey=p.EventKey ORDER BY e.LastModifiedDateTime DESC,p.ProjectNumber,p.EventKey'
   $missingArchiveReader=$missingArchiveCommand.ExecuteReader();$databaseProjects=[Data.DataTable]::new();$databaseProjects.Load($missingArchiveReader)
   foreach($dbProject in $databaseProjects.Rows){
    if($Limit -gt 0 -and ($selectedIds.Count+$missingArchiveAdded) -ge $Limit){break}
@@ -967,10 +973,20 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    if($ProjectId -and $number -notin $ProjectId){continue}
    if($groups.ContainsKey($number)){continue}
    $displayNumber=if([string]::IsNullOrWhiteSpace($number)){'[No project number]'}else{$number}
-   $missingSummary=[pscustomobject][ordered]@{Project=$displayNumber;ProjectEventKey=[string]$dbProject.EventKey;csdproj=$null;CsdprojLastModifiedUtc=$null;Status='No csdproj found';NoCsdproj=$true;DbTrussCount=[int]$dbProject.TrussCount;LatestDatabaseModified=if($dbProject.ProjectModified -is [DBNull]){$null}else{$dbProject.ProjectModified};Healthy=$false}
+   $dbOnlyDuplicates=[pscustomobject]@{AffectedTrusses=$null;ExtraPieceRows=$null;Groups=@();Fields=@();Note='DB piece data unavailable.'}
+   $dbOnlyCommand=$conn.CreateCommand();$dbOnlyCommand.CommandTimeout=60;$dbOnlyReader=$null
+   try{
+    $dbOnlyCommand.CommandText='SELECT h.Name AS TrussName,pi.* FROM dbo.Piece pi JOIN dbo.ComponentHeader h ON h.ComponentHeaderKey=pi.ComponentKey WHERE h.ProjectEventKey=@event AND EXISTS (SELECT 1 FROM dbo.ComponentTruss t WHERE t.ComponentKey=pi.ComponentKey)'
+    $null=$dbOnlyCommand.Parameters.Add('@event',[Data.SqlDbType]::UniqueIdentifier);$dbOnlyCommand.Parameters['@event'].Value=$dbProject.EventKey
+    $dbOnlyReader=$dbOnlyCommand.ExecuteReader();$dbOnlyPieces=[Data.DataTable]::new();$dbOnlyPieces.Load($dbOnlyReader)
+    $dbOnlyDuplicates=FindDuplicatePieces $dbOnlyPieces
+   }catch{$dbOnlyDuplicates.Note='DB piece duplicate check unavailable: '+$_.Exception.Message}
+   finally{if($dbOnlyReader){$dbOnlyReader.Dispose()};$dbOnlyCommand.Dispose()}
+   $missingSummary=[pscustomobject][ordered]@{Project=$displayNumber;ProjectEventKey=[string]$dbProject.EventKey;csdproj=$null;CsdprojLastModifiedUtc=$null;Status='No csdproj found';NoCsdproj=$true;DatabaseBoardFeet=if($dbProject.CachedBoardFeet -is [DBNull]){$null}else{[decimal]$dbProject.CachedBoardFeet};DatabaseBoardFeetBasis='Unverified';DuplicateAffectedTrusses=$dbOnlyDuplicates.AffectedTrusses;DuplicateExtraPieceRows=$dbOnlyDuplicates.ExtraPieceRows;DuplicateNote=$dbOnlyDuplicates.Note;DbTrussCount=[int]$dbProject.TrussCount;LatestDatabaseModified=if($dbProject.ProjectModified -is [DBNull]){$null}else{$dbProject.ProjectModified};Healthy=$false}
    $missingPage='db-'+([guid]$dbProject.EventKey).ToString('N')+'.html'
    $allSummary.Add($missingSummary);$links.Add([pscustomobject]@{Summary=$missingSummary;Page=$missingPage})
    $missingBody='<p><a href="../index.html">Back to all projects</a></p><p class="notice">No eligible csdproj archive was found under '+(Enc $root)+'. DeletedProjects, directory reparse points and Attachment_/Attachments_ archives are excluded from the scan. This does not establish whether an archive exists elsewhere.</p><div class="scroll">'+(SummaryTable @($missingSummary))+'</div><p>DB project ID: '+(Enc $dbProject.EventKey)+'</p>'
+   $missingBody+=DuplicatePieceDetails $dbOnlyDuplicates
    Page $displayNumber $missingBody (Join-Path $pages $missingPage)
    $missingArchiveAdded++
   }
