@@ -32,6 +32,7 @@ param(
  [switch]$Timestamp,
  [switch]$CheckDbOnlyDuplicates,
  [datetime]$LegacyCutoffDate=[datetime]'2025-01-08',
+ [ValidatePattern('^\d+(\.\d+){0,3}$')][string]$LegacyCutoffVersion='2024.7.2.7',
  [ValidateRange(0,2147483647)][int]$Limit=0,
  [string]$FileTimeZone=([TimeZoneInfo]::Local.Id),
  [string]$DatabaseTimeZone=([TimeZoneInfo]::Local.Id),
@@ -123,9 +124,34 @@ function CellColor($column,$value){
  }
  return ''
 }
-function LegacyAssessment($projectTable,$databaseRows,$pieceTable,[bool]$archiveComplete,[int]$jsonTrusses,[datetime]$cutoff){
- $result=[ordered]@{IsLegacy=$false;LatestDatabaseModified=$null;CutoffDate=$cutoff.Date;Reason=''}
+function ParseAnalysisVersion($value){
+ if($null -eq $value -or $value -is [DBNull]){return $null}
+ $parts=([string]$value).Trim() -split '\.'
+ if($parts.Count -lt 1 -or $parts.Count -gt 4){return $null}
+ $numbers=@(0,0,0,0)
+ for($i=0;$i -lt $parts.Count;$i++){$n=0;if(-not [int]::TryParse($parts[$i],[ref]$n)){return $null};$numbers[$i]=$n}
+ ,$numbers
+}
+function CompareAnalysisVersion($a,$b){
+ for($i=0;$i -lt 4;$i++){if($a[$i] -lt $b[$i]){return -1};if($a[$i] -gt $b[$i]){return 1}}
+ 0
+}
+function LegacyAssessment($projectTable,$databaseRows,$pieceTable,[bool]$archiveComplete,[int]$jsonTrusses,[datetime]$cutoff,[string]$cutoffVersion){
+ $result=[ordered]@{IsLegacy=$false;LatestDatabaseModified=$null;CutoffDate=$cutoff.Date;Reason='';Basis='';VersionEvidence=''}
  if(-not $archiveComplete -or $jsonTrusses -ne 0 -or $projectTable.Rows.Count -ne 1 -or @($databaseRows).Count -eq 0 -or $null -eq $pieceTable){return [pscustomobject]$result}
+ $cutoffParsed=ParseAnalysisVersion $cutoffVersion
+ $versions=[Collections.Generic.List[object]]::new();$versionsKnown=$true
+ foreach($record in $databaseRows){$parsed=ParseAnalysisVersion $record.AnalysisVersion;if($null -eq $parsed){$versionsKnown=$false;break};$versions.Add([pscustomobject]@{Text=([string]$record.AnalysisVersion).Trim();Number=$parsed})}
+ if($versionsKnown -and $null -ne $cutoffParsed){
+  $oldCount=@($versions | Where-Object {(CompareAnalysisVersion $_.Number $cutoffParsed) -lt 0}).Count
+  $texts=@($versions | Select-Object -ExpandProperty Text -Unique | Sort-Object)
+  $result.VersionEvidence='AnalysisVersion: '+($texts -join ', ')+' ('+$oldCount+' of '+$versions.Count+' trusses below '+$cutoffVersion+')'
+  if($oldCount -eq $versions.Count){
+   $result.IsLegacy=$true;$result.Basis='AnalysisVersion'
+   $result.Reason='Legacy [2024.r7]: no truss JSON exists and every DB truss was last analyzed by a version below '+$cutoffVersion+' ('+($texts -join ', ')+'), recorded in ComponentTruss.AnalysisVersion. Before 2024.r7, values were stored directly in the database; project files were not the source of truth. File/DB comparisons are not applicable and should be ignored.'
+  }
+  return [pscustomobject]$result
+ }
  # Require known modification dates for the project and all compared DB records.
  $dates=[Collections.Generic.List[datetime]]::new()
  $value=$projectTable.Rows[0].ProjectModified
@@ -136,7 +162,7 @@ function LegacyAssessment($projectTable,$databaseRows,$pieceTable,[bool]$archive
  foreach($piece in $pieceTable.Rows){$value=$piece.LastModifiedDateTime;if($null -eq $value -or $value -is [DBNull]){return [pscustomobject]$result};$dates.Add([datetime]$value)}
  $latest=($dates | Sort-Object -Descending | Select-Object -First 1);$result.LatestDatabaseModified=$latest
  if($latest -lt $cutoff.Date.AddDays(1)){
-  $result.IsLegacy=$true
+  $result.IsLegacy=$true;$result.Basis='Date'
   $result.Reason='Possibly Legacy [2024.r7]: no truss JSON exists and the latest project/truss/piece DB modification ('+$latest.ToString('yyyy-MM-dd HH:mm:ss')+', DB wall time) is on or before '+$cutoff.ToString('yyyy-MM-dd')+'. The actual customer upgrade date is unknown; the cutoff is an approximate release milestone, not a verified installation date. Before the delayed 2024.r7 release, values were stored directly in the database; project files were not the source of truth. File/DB comparisons are not applicable and should be ignored.'
  }
  [pscustomobject]$result
@@ -157,7 +183,7 @@ function BoardFeetStatus($row){
 }
 
 function StatusHtml($row){
- if($row.LegacyPre2024R7){return '<b title="'+(Enc $row.LegacyReason)+'">Possibly Legacy [2024.r7]</b><br><small>Comparisons not applicable</small>'}
+ if($row.LegacyPre2024R7){$legacyLabel=if($row.LegacyBasis -eq 'AnalysisVersion'){'Legacy [2024.r7]'}else{'Possibly Legacy [2024.r7]'};return '<b title="'+(Enc $row.LegacyReason)+'">'+$legacyLabel+'</b><br><small>Comparisons not applicable</small>'}
  $parts=[Collections.Generic.List[string]]::new()
  if($row.Healthy){$parts.Add('<div class="close healthy-status" style="padding:5px;margin:3px 0"><b>Healthy</b></div>')}elseif(HealthyProject $row){$parts.Add('<div class="close" style="padding:5px;margin:3px 0"><b>Inventory / fields / files match</b></div>')}
  if($row.BoardFeetSettingsDifferent -eq $true){
@@ -541,7 +567,7 @@ function ReportLegend($fileZoneName,$databaseZoneName,[double]$timestampToleranc
 <section class="legend-card"><h3><span class="legend-number">5</span>DB row duplicates &mdash; is piece data repeated?</h3><ul><li><span class="legend-key">Affected trusses:</span> DB trusses containing repeated piece data.</li><li><span class="legend-key">Extra piece rows:</span> repetitions beyond the first copy. Three identical rows count as two extra rows.</li><li>Counts cover all DB trusses in the project, including trusses missing from the csdproj.</li></ul><div class="legend-tags"><span class="legend-tag error">Red: suspected duplicates found</span></div><p>These counts refer to suspected duplicate piece rows within a DB truss, not duplicates across every DB table. They are candidates for review, not confirmed errors. The project page shows the matching records and their identifiers. For DB projects without csdproj, this check is skipped by default: their duplicate counts show gray <code>-</code> with a note explaining the check was not run. Enable it with <code>-CheckDbOnlyDuplicates</code>.</p><details><summary>What makes two piece rows a suspected duplicate?</summary><ul><li>They belong to the same DB truss (ComponentKey), and all stored business values match exactly: geometry, engineering label, lumber/pricing references, dimensions, lengths, plies and calculated footage/cost values.</li><li>Record IDs and creation/modification dates and users are excluded from matching.</li><li>Comparisons are case-sensitive and use no numeric tolerance. Pieces with differing business values are not counted.</li><li>Counts identify distinct truss component IDs and repeat for each archive of the same DB project. Legitimate repetitions require manual review.</li><li>Missing/ambiguous DB projects or a failed piece query produce unavailable counts, not zero duplicates.</li></ul></details></section>
 <section class="legend-card"><h3><span class="legend-number">6</span>Timestamps &mdash; which date is earlier?</h3><ul><li><span class="legend-key">Older:</span> the JSON timestamp inside the csdproj is earlier than the DB truss timestamp by more than $secondsLabel seconds.</li><li><span class="legend-key">Close:</span> the two timestamps are within $secondsLabel seconds.</li><li><span class="legend-key">Newer:</span> the JSON timestamp is later than the DB truss timestamp by more than $secondsLabel seconds.</li><li><span class="legend-key">Minimum / maximum difference:</span> the smallest / largest signed JSON-minus-DB time gap. <b>&minus;2d</b> means two days earlier; <b>+2d</b> means two days later.</li></ul><div class="legend-tags"><span class="legend-tag older">Amber: older</span><span class="legend-tag close">Green: close</span><span class="legend-tag newer">Blue: newer</span><span class="legend-tag mixed">Purple: both older and newer</span><span class="legend-tag unknown">Gray: unavailable</span></div><p>Dates are investigation clues. They do not prove an older/newer truss version or explain the cause of a difference.</p><details><summary>Timestamp comparison rules</summary><ul><li>These counts cover matched trusses only and compare ZIP-entry JSON timestamps with <code>ComponentTruss.LastModifiedDateTime</code>, not the outer csdproj file's save date.</li><li>Timestamp counts overlap field-comparison counts. Purple in Status means some matched JSON timestamps are older and others are newer.</li><li>Missing JSON, missing DB times, or ambiguous/invalid daylight-saving times make the comparison unavailable.</li><li>Signed difference colors indicate earlier/later even within tolerance. Processing errors take priority over timestamp hints.</li><li>Packaging can affect how timestamps are represented. Review the original archive metadata before using dates as root-cause evidence.</li></ul></details></section>
 <section class="legend-card"><h3><span class="legend-number">7</span>Review markers &mdash; a separate review check</h3><ul><li><span class="legend-key">Review markers differ:</span> matched trusses whose CSEngineer review/sealing marker differs between JSON and the DB.</li><li>This marker is assigned by the external review program. It is not the file checksum and does not by itself establish a design difference.</li></ul><details><summary>Technical field</summary><p>The value compared is <code>TrussMatchCode</code>. Marker-only differences are counted in the summary but excluded from the main difference detail list.</p></details></section>
-<section class="legend-card"><h3><span class="legend-number">8</span>Status and unresolved comparisons &mdash; what needs review?</h3><ul><li><span class="legend-key">Status:</span> reports inventory/field/file agreement alongside a separate BDFT result, and highlights missing trusses, processing problems and timestamp direction. Several messages may appear together.</li><li><span class="legend-key">Unresolved comparisons:</span> trusses that could not be compared reliably. These are not confirmed data differences.</li><li><span class="legend-key">Unavailable / Unknown:</span> insufficient information to complete that check. This does not mean the values agree.</li></ul><details><summary>Common reasons and overview sections</summary><ul><li>Duplicate JSON/tdlTruss names, multiple matching DB trusses or project records, missing required JSON, or no usable checked fields can leave a comparison unresolved.</li><li>Parsing and processing errors are reported separately. Review the project page for the reason.</li><li><b>Results:</b> projects with comparison data or issues.</li><li><b>Project not in DB:</b> no DB project matches the folder's identifier, even if the file counts are zero.</li><li><b>Possibly Legacy [2024.r7]:</b> no truss JSON and known project/truss/piece database modification dates on or before the configured cutoff. Yellow rows are excluded from comparison because pre-2024.r7 values lived in the database. The actual customer upgrade date is unknown; this is an inference, not a verified version check. Newer or undated projects without JSON remain unresolved.</li><li><b>Empty:</b> projects with no trusses to compare.</li><li><b>DB projects without csdproj:</b> database projects with no eligible archive under the scanned root, listed after Empty and sorted by DB project modification time. This check uses the full archive inventory to identify missing files, respects -ProjectId, and fills only remaining -Limit slots after archive projects are exhausted.</li></ul></details></section>
+<section class="legend-card"><h3><span class="legend-number">8</span>Status and unresolved comparisons &mdash; what needs review?</h3><ul><li><span class="legend-key">Status:</span> reports inventory/field/file agreement alongside a separate BDFT result, and highlights missing trusses, processing problems and timestamp direction. Several messages may appear together.</li><li><span class="legend-key">Unresolved comparisons:</span> trusses that could not be compared reliably. These are not confirmed data differences.</li><li><span class="legend-key">Unavailable / Unknown:</span> insufficient information to complete that check. This does not mean the values agree.</li></ul><details><summary>Common reasons and overview sections</summary><ul><li>Duplicate JSON/tdlTruss names, multiple matching DB trusses or project records, missing required JSON, or no usable checked fields can leave a comparison unresolved.</li><li>Parsing and processing errors are reported separately. Review the project page for the reason.</li><li><b>Results:</b> projects with comparison data or issues.</li><li><b>Project not in DB:</b> no DB project matches the folder's identifier, even if the file counts are zero.</li><li><b>Legacy [2024.r7]:</b> no truss JSON and every DB truss has a parseable <code>ComponentTruss.AnalysisVersion</code> below the configured cutoff version (default 2024.7.2.7). This is recorded evidence, not a date guess. If all versions are known and any truss is at or above the cutoff, the project is compared normally.</li><li><b>Possibly Legacy [2024.r7]:</b> used only when a truss version is missing or unparseable: no truss JSON and known project/truss/piece database modification dates on or before the configured cutoff. Yellow rows are excluded from comparison because pre-2024.r7 values lived in the database. The actual customer upgrade date is unknown; this is an inference, not a verified version check. Newer or undated projects without JSON remain unresolved.</li><li><b>Empty:</b> projects with no trusses to compare.</li><li><b>DB projects without csdproj:</b> database projects with no eligible archive under the scanned root, listed after Empty and sorted by DB project modification time. This check uses the full archive inventory to identify missing files, respects -ProjectId, and fills only remaining -Limit slots after archive projects are exhausted.</li></ul></details></section>
 </div>
 <p><b>Report rows:</b> each row represents one project and one csdproj archive. Multiple archives for a project stay separate to preserve their saved states. Click a project name to open its details.</p><div class="legend-foot"><span><b>0</b> = an actual count of zero</span><span><b>&mdash;</b> = unavailable or no comparison could be made</span><span>Open a project to review the supporting details.</span></div>
 <details class="legend-settings"><summary>Technical settings for this run</summary><ul><li>Timestamp tolerance: <b>$secondsLabel seconds</b>.</li><li>Numeric field tolerance: <code>$numberLabel</code>.</li><li>csdproj JSON timestamp timezone: <b>$fileLabel</b>.</li><li>DB timestamp timezone: <b>$databaseLabel</b>.</li><li>Both timezone interpretations default to the machine's current timezone when the script runs. <code>-FileTimeZone</code> and <code>-DatabaseTimeZone</code> can override them independently.</li><li>Processing is read-only. Original csdproj files and DB records are unchanged; DeletedProjects folders and Attachment_/Attachments_ archives are skipped.</li></ul></details>
@@ -917,15 +943,17 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    $s | Add-Member -NotePropertyName BoardFeetQuantityDifferences -NotePropertyValue $fileBasisComparison.QuantityDifferences
    $s | Add-Member -NotePropertyName BoardFeetSettingsDifferent -NotePropertyValue $fileBasisComparison.SettingsDifferent
    $s | Add-Member -NotePropertyName SameBasisBoardFeetNote -NotePropertyValue $fileBasisComparison.Note
-   $legacy=LegacyAssessment $pt $dbt.Rows $pieceTable ($errors.Count -eq 0 -and $null -ne $tdlCount) $count.JsonTrusses $LegacyCutoffDate
+   $legacy=LegacyAssessment $pt $dbt.Rows $pieceTable ($errors.Count -eq 0 -and $null -ne $tdlCount) $count.JsonTrusses $LegacyCutoffDate $LegacyCutoffVersion
    $s | Add-Member -NotePropertyName LegacyPre2024R7 -NotePropertyValue $legacy.IsLegacy
+   $s | Add-Member -NotePropertyName LegacyBasis -NotePropertyValue $legacy.Basis
+   $s | Add-Member -NotePropertyName LegacyVersionEvidence -NotePropertyValue $legacy.VersionEvidence
    $s | Add-Member -NotePropertyName LegacyReason -NotePropertyValue $legacy.Reason
    $s | Add-Member -NotePropertyName LatestDatabaseModified -NotePropertyValue $legacy.LatestDatabaseModified
    if($legacy.IsLegacy){
-    $s.Status='Possibly Legacy [2024.r7]'
+    $s.Status=if($legacy.Basis -eq 'AnalysisVersion'){'Legacy [2024.r7]'}else{'Possibly Legacy [2024.r7]'}
     # Suppress numeric comparison outcomes in JSON as well as the HTML/console.
     foreach($property in @($s.PSObject.Properties.Name)){
-     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','LegacyPre2024R7','LegacyReason','LatestDatabaseModified','JsonTrussCount','TdlTrussCount','DbTrussCount','DatabaseBoardFeet','DatabaseBoardFeetBasis','DatabasePieceBoardFeetBasis','BoardFeetBasisNote','DuplicateAffectedTrusses','DuplicateExtraPieceRows')){$s.$property=$null}
+     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','LegacyPre2024R7','LegacyBasis','LegacyVersionEvidence','LegacyReason','LatestDatabaseModified','JsonTrussCount','TdlTrussCount','DbTrussCount','DatabaseBoardFeet','DatabaseBoardFeetBasis','DatabasePieceBoardFeetBasis','BoardFeetBasisNote','DuplicateAffectedTrusses','DuplicateExtraPieceRows')){$s.$property=$null}
     }
    }
    $dataChecksHealthy=HealthyProject $s
@@ -963,13 +991,14 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
  }
  # Compare DB projects with the complete eligible archive inventory, not the limited selection.
  if($Limit -eq 0 -or $selectedIds.Count -lt $Limit){
- $missingArchiveAdded=0
+ $missingArchiveAdded=0;$dbScanIndex=0;Write-Progress -Id 1 -Activity 'DB projects without csdproj' -Status 'Querying database projects'
  $missingArchiveCommand=$conn.CreateCommand();$missingArchiveCommand.CommandTimeout=60;$missingArchiveReader=$null
  try{
   $missingArchiveCommand.CommandText='SELECT p.EventKey,p.ProjectNumber,p.CachedBoardFeet,e.LastModifiedDateTime AS ProjectModified,COALESCE(tc.TrussCount,0) AS TrussCount FROM dbo.Project p LEFT JOIN dbo.Event e ON e.EventKey=p.EventKey LEFT JOIN (SELECT h.ProjectEventKey,COUNT(*) AS TrussCount FROM dbo.ComponentHeader h JOIN dbo.ComponentTruss t ON t.ComponentKey=h.ComponentHeaderKey GROUP BY h.ProjectEventKey) tc ON tc.ProjectEventKey=p.EventKey ORDER BY e.LastModifiedDateTime DESC,p.ProjectNumber,p.EventKey'
   $missingArchiveReader=$missingArchiveCommand.ExecuteReader();$databaseProjects=[Data.DataTable]::new();$databaseProjects.Load($missingArchiveReader)
   foreach($dbProject in $databaseProjects.Rows){
    if($Limit -gt 0 -and ($selectedIds.Count+$missingArchiveAdded) -ge $Limit){break}
+   $dbScanIndex++;if($dbScanIndex % 10 -eq 1){Write-Progress -Id 1 -Activity 'DB projects without csdproj' -Status "Scanned $dbScanIndex of $($databaseProjects.Rows.Count); reported $missingArchiveAdded" -PercentComplete ($dbScanIndex*100/[math]::Max(1,$databaseProjects.Rows.Count))}
    $number=[string]$dbProject.ProjectNumber
    if($ProjectId -and $number -notin $ProjectId){continue}
    if($groups.ContainsKey($number)){continue}
@@ -1029,7 +1058,7 @@ $context='{0} archive projects; {1} csdproj archives; {4} DB projects without cs
 $indexLegend=ReportLegend $FileTimeZone $DatabaseTimeZone $ToleranceSeconds $NumericTolerance ([bool]$Timestamp) $context
 Page 'CSDirector: Database and Project file Sync Report' ($indexLegend+$table.ToString()) (Join-Path $out 'index.html') -Overview
 $allSummary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'summary.json') -Encoding UTF8
-[pscustomobject]@{Run=$runId;ReportCreatedUtc=$reportCreatedUtc;Owner=$reportOwner;Source=$root;Server=$Server;Database=$Database;FileTimeZone=$FileTimeZone;DatabaseTimeZone=$DatabaseTimeZone;ToleranceSeconds=$ToleranceSeconds;NumericTolerance=$NumericTolerance;Fields=$map;RetainEvidence=$retainEvidence;LegacyCutoffDate=$LegacyCutoffDate.Date;Timestamp=[bool]$Timestamp;CheckDbOnlyDuplicates=[bool]$CheckDbOnlyDuplicates} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'settings.json') -Encoding UTF8
+[pscustomobject]@{Run=$runId;ReportCreatedUtc=$reportCreatedUtc;Owner=$reportOwner;Source=$root;Server=$Server;Database=$Database;FileTimeZone=$FileTimeZone;DatabaseTimeZone=$DatabaseTimeZone;ToleranceSeconds=$ToleranceSeconds;NumericTolerance=$NumericTolerance;Fields=$map;RetainEvidence=$retainEvidence;LegacyCutoffDate=$LegacyCutoffDate.Date;LegacyCutoffVersion=$LegacyCutoffVersion;Timestamp=[bool]$Timestamp;CheckDbOnlyDuplicates=[bool]$CheckDbOnlyDuplicates} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'settings.json') -Encoding UTF8
 Write-Progress -Id 2 -Activity 'Files' -Completed
 Write-Progress -Id 1 -Activity 'Projects' -Completed
 $reportPath=Join-Path $out 'index.html'
