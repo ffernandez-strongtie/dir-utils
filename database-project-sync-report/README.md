@@ -41,6 +41,7 @@ The script prompts for the projects root, SQL server, database, and output base 
 | `-Limit` | Include at most N projects. Archive projects come first, ranked by their newest eligible csdproj modification time descending; ties use project identifier. All archives for each selected project are included. Only after archive projects are exhausted do DB-only projects fill remaining slots, newest DB modification first. `0` means no limit. |
 | `-Evidence True` | Retain copied archives, extracted JSON, and detailed comparison inventories. Default: `False`. |
 | `-Timestamp` | Enable timestamp comparisons. Off by default. |
+| `-CheckDbOnlyDuplicates` | Run the suspected-duplicate piece check for DB projects without csdproj. Off by default: those projects show gray `-` duplicate counts with a note that the check was not run. |
 | `-FileTimeZone`, `-DatabaseTimeZone` | Interpret timestamps using the specified Windows time zones. Each defaults to the current machine's time zone. |
 | `-ToleranceSeconds` | Timestamp comparison tolerance. Default: `120`. |
 | `-NumericTolerance` | Selected numeric-field comparison tolerance. Default: `0.000001`. |
@@ -96,6 +97,11 @@ These rows have a yellow status cell in their own **Possibly Legacy [2024.r7]** 
 
 ## Database projects without archives
 
-After **Empty**, the index lists **DB projects without csdproj**, sorted by DB project modification time descending (unknown dates last). The first column shows the DB project’s last-modified time (database wall time, not creation time). DB truss counts, stored BDFT, and duplicate-piece counts remain in their normal columns; unavailable values use gray cells with `-`. Each row links to a project page carrying the same report identity header. These records are also included in `summary.json`.
+After **Empty**, the index lists **DB projects without csdproj**, sorted by DB project modification time descending (unknown dates last). The first column shows the DB project’s last-modified time (database wall time, not creation time). DB truss counts and stored BDFT remain in their normal columns; unavailable values use gray cells with `-`. The suspected-duplicate piece check is skipped by default for DB-only projects, so their duplicate counts show gray `-` with a note that the check was not run; add `-CheckDbOnlyDuplicates` to enable it. Each row links to a project page carrying the same report identity header. These records are also included in `summary.json`.
 
 This check compares database projects against the full eligible archive inventory under `ProjectsRoot`, before `-Limit` is applied. `-Limit` is shared: archive projects use the budget first, then DB-only projects fill remaining slots in descending DB modification order; `-ProjectId` restricts both lists. Existing exclusions apply (DeletedProjects, directory reparse points, and Attachment_/Attachments_ archives). “No csdproj found” describes this scan scope, not proof that no archive exists elsewhere.
+
+```powershell
+# Also run the suspected-duplicate piece check for DB-only projects.
+.\csdirector-database-project-file-sync-report.ps1 -CheckDbOnlyDuplicates
+```
