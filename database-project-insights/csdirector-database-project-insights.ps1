@@ -318,7 +318,7 @@ $IndexTemplate=@'
 <p><input type=text id=q placeholder="filter project number"> Issue: @@CHIPS@@</p>
 <table><thead><tr><th>Project</th><th>State</th><th>Verdict</th><th>Top causes</th><th>Trusses</th></tr></thead><tbody id=tb>@@ROWS@@</tbody></table>
 </main>
-<script>let t='All';const cs=new Set();function f(){const q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#tb tr').forEach(r=>{const rc=(r.dataset.c||'').split('|');r.style.display=((t=='All'||r.dataset.s==t)&&r.textContent.toLowerCase().indexOf(q)>=0&&(!cs.size||[...cs].some(c=>rc.includes(c))))?'':'none'})}
+<script>let t='Inconsistent';const cs=new Set();function f(){const q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#tb tr').forEach(r=>{const rc=(r.dataset.c||'').split('|');r.style.display=(r.dataset.s==t&&r.textContent.toLowerCase().indexOf(q)>=0&&(!cs.size||[...cs].some(c=>rc.includes(c))))?'':'none'})}
 document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x==e));f()});document.querySelectorAll('.chip').forEach(e=>e.onclick=()=>{const c=e.dataset.c;cs.has(c)?cs.delete(c):cs.add(c);e.classList.toggle('on');f()});document.getElementById('q').oninput=f;</script>
 '@
 
@@ -430,10 +430,10 @@ if(-not $ProjectId -and $Limit -le 0){
 $order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Pre-r7'=4;'DB only'=5}
 $ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
 $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.state]++}
-$tabNames=@('All','Inconsistent','Stale DB','Not in DB','Consistent','Pre-r7','DB only')
-$tabCount=@{All=$ranked.Count}+$cnt
+$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Pre-r7','DB only')
+$tabCount=$cnt
 $cards=(($tabNames | ForEach-Object {'<div class=card><b>'+$tabCount[$_]+'</b>'+$_+'</div>'}) -join '')
-$tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'All'){' on'}else{''})+'" data-t="'+$_+'">'+$_+' ('+$tabCount[$_]+')</div>'}) -join '')
+$tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'">'+$_+' ('+$tabCount[$_]+')</div>'}) -join '')
 $allChips=(($Rules.Values | ForEach-Object {'<span class="chip" data-c="'+(Esc $_[0])+'" title="'+(Esc $_[1])+'">'+(Esc $_[0])+'</span>'}) -join '')
 $sb=[Text.StringBuilder]::new()
 foreach($o in $ranked){
