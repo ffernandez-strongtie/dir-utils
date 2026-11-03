@@ -19,7 +19,7 @@ Without `-SqlUser` it uses Windows authentication. The password is only read fro
 | `-OutputDirectory` | `.\output-insights` | Timestamp is appended |
 | `-ProjectId` | all | Limit to specific project numbers |
 | `-Limit` | 0 (all) | Stop after N projects |
-| `-LegacyCutoffVersion` | `2024.7.2.7` | Truss versions strictly lower are pre-r7 (DB was the source of truth) |
+| `-LegacyCutoffVersion` | `2024.7.2.7` | Truss versions strictly lower are before 2024.r7 (DB was the source of truth) |
 
 The latest archive per project folder is used. Projects with no archive are not listed.
 
@@ -35,10 +35,10 @@ The latest archive per project folder is used. Projects with no archive are not 
 - **Not in DB**: archive exists, no Project row.
 - **Inconsistent**: at least one real mismatch (value, version, checksum, or truss missing on one side) while the DB is current.
 - **Stale DB**: differences exist, but the DB check-in id is older than the archive timestamp (re-saved in Studio since).
-- **Pre-r7**: every truss is DB-only at a version below the cutoff; nothing to compare.
+- **Before 2024.r7**: every truss is DB-only at a version below the cutoff; nothing to compare.
 - **Consistent**: no findings.
 
-Symbols in the matrix: ✓ match, ≠ mismatch, ↻ stale DB, ⏸ pre-r7 DB-only, ∅ not comparable.
+Symbols in the matrix: ✓ match, ≠ mismatch, ↻ stale DB, ⏸ before 2024.r7 DB-only, ∅ not comparable.
 
 ## Checks
 

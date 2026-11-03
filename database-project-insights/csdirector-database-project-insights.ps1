@@ -52,16 +52,16 @@ $FieldGroup=@{Quantity='Identity';PitchLeftTopOver12='Pitch';PitchRightTopOver12
 $Rules=[ordered]@{
  'R-PROJ'=@('Project not in DB','Archive exists but no Project row with this number in the DB.')
  'R-FCI'=@('DB differs from archive','DB check-in (Project.FilesCheckInId) should equal the timestamp in the archive file name.')
- 'R-FILE'=@('Truss missing from archive','DB truss at a current (r7+) version has no Trusses/generated/<name>.json in the archive. Pre-r7 DB-only trusses are expected and excluded.')
+ 'R-FILE'=@('Truss missing from archive','DB truss at a current (r7+) version has no Trusses/generated/<name>.json in the archive. Before 2024.r7 DB-only trusses are expected and excluded.')
  'R-DB'=@('Truss missing from DB','Truss file exists in the archive but no ComponentHeader row with that name.')
  'R-DUP'=@('Duplicate truss in DB','More than one DB row for the same truss name.')
  'R-CKSUM'=@('Truss file checksum differs','MD5 of Trusses/<name>.tdlTruss should equal ComponentHeader.TrussFileCheckSum.')
  'R-TDL'=@('Truss file missing','No .tdlTruss to checksum.')
- 'R-VER'=@('Truss version differs','Truss JSON Version should equal ComponentTruss.AnalysisVersion. Reported as stale when the DB is frozen pre-r7 and the file is current.')
+ 'R-VER'=@('Truss version differs','Truss JSON Version should equal ComponentTruss.AnalysisVersion. Reported as stale when the DB is frozen before 2024.r7 and the file is current.')
  'R-FLD'=@('Truss value differs','Mapped truss JSON field should equal its ComponentTruss/Component column (tolerance 0.001).')
 }
 $StaleRules=@('R-CKSUM','R-DB','R-FLD','R-VER','R-FILE')
-$Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Pre-r7'='b-pre';'Stale DB'='b-warn';'Not in DB'='b-warn';'DB only'='b-pre'}
+$Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Before 2024.r7'='b-pre';'Stale DB'='b-warn';'Not in DB'='b-warn';'DB only'='b-pre'}
 
 function ParseVer($s){
  if($null -eq $s){return $null}
@@ -201,7 +201,7 @@ function AnalyzeProject($number,$archivePath,$cut){
    $same=([string]$jv -eq [string]$dv)
    if(-not $same){
     if($null -ne $dvp -and (VerLess $dvp $cut) -and -not ($null -ne $fvp -and (VerLess $fvp $cut))){
-     AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'DB frozen at pre-r7 version; file is current (re-opened in Studio, DB not refreshed)' 'Version' 'warn'
+     AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'DB frozen at before 2024.r7 version; file is current (re-opened in Studio, DB not refreshed)' 'Version' 'warn'
     }else{
      AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'File and DB version differ' 'Version'
     }
@@ -243,7 +243,7 @@ function AnalyzeProject($number,$archivePath,$cut){
 function StateOf($o){
  if($o.notInDb){return 'Not in DB'}
  foreach($f in $o.findings){if($f.sev -eq 'error'){return 'Inconsistent'}}
- if($o.counts.trusses -gt 0 -and $o.counts.pre -eq $o.counts.trusses){return 'Pre-r7'}
+ if($o.counts.trusses -gt 0 -and $o.counts.pre -eq $o.counts.trusses){return 'Before 2024.r7'}
  if($o.findings.Count -gt 0){return 'Stale DB'}
  'Consistent'
 }
@@ -253,7 +253,7 @@ function VerdictOf($o,$st){
   'Consistent'{"All $n trusses match."}
   'Not in DB'{'Archive exists, but the project is not in the DB'}
   'DB only'{'In the DB, but no archive folder on disk. Not compared.'}
-  'Pre-r7'{'Frozen pre-r7 DB state; no Studio files to compare.'}
+  'Before 2024.r7'{'Frozen before 2024.r7 DB state; no Studio files to compare.'}
   'Stale DB'{"DB older than the archive (re-saved in Studio). $($o.counts.stale) of $n trusses differ."}
   default{"$($o.counts.bad) of $n trusses have real mismatches."}
  }
@@ -280,7 +280,7 @@ $ProjectTemplate=@'
 <!doctype html><meta charset=utf-8><title>@@TITLE@@</title><style>@@CSS@@</style>
 <header><h1><a href="../../index.html" style="color:#9cd0ff">All projects</a> / @@TITLE@@ <span class="badge @@BADGE@@">@@STATE@@</span></h1>
 <small>@@META@@</small></header>
-<main><div class="legend"><span><i class="sw c-ok"></i>matches</span><span><i class="sw c-bad"></i>real mismatch</span><span><i class="sw c-stale"></i>stale DB (file newer)</span><span><i class="sw c-pre"></i>pre-r7 DB-only (expected)</span><span><i class="sw c-na"></i>not comparable</span></div>
+<main><div class="legend"><span><i class="sw c-ok"></i>matches</span><span><i class="sw c-bad"></i>real mismatch</span><span><i class="sw c-stale"></i>stale DB (file newer)</span><span><i class="sw c-pre"></i>before 2024.r7 DB-only (expected)</span><span><i class="sw c-na"></i>not comparable</span></div>
 <p>Filter by issue: @@CHIPS@@</p>
 <p><input type=text id=q placeholder="filter truss name"> <label><input type=checkbox id=onlyBad checked> only trusses with findings</label> <span id=cnt></span></p>
 <table style="table-layout:fixed"><thead><tr><th>Truss</th>@@HEADERS@@<th class=cell style="width:220px">Version (file / DB)</th></tr></thead><tbody id=tb></tbody></table></main>
@@ -297,7 +297,7 @@ const extra=r[2].filter(f=>f[0]!='Truss value differs'&&f[0]!='Truss version dif
 const xr=extra.map(f=>'<tr class=dd><td>'+f[6]+'</td><td>'+esc(f[1])+'</td><td>-</td><td class=d>'+fv(f[2])+'</td><td class=d>'+fv(f[3])+'</td><td>'+(f[4]=='stale'?'stale':'differs')+'</td></tr>').join('');
 if(F.length||xr){h+='<table class=sbs><tr><th>Group</th><th>JSON field</th><th>DB column</th><th>DB</th><th>File</th><th></th></tr>'+xr+bad.map(row).join('')+(all_.has(i)?rest.map(row).join(''):'')+'</table>';
 if(rest.length)h+='<a href="#" onclick="all_.has('+i+')?all_.delete('+i+'):all_.add('+i+');draw();return false">'+(all_.has(i)?'hide':'show')+' '+rest.length+' matching/other fields</a>';}
-else h+='<p>No comparable fields (truss present on one side only or pre-r7 DB-only).</p>';
+else h+='<p>No comparable fields (truss present on one side only or before 2024.r7 DB-only).</p>';
 return h+'</td></tr>'}
 function draw(){const q=document.getElementById('q').value.toLowerCase(),ob=document.getElementById('onlyBad').checked;let n=0,h='';
 D.forEach((r,i)=>{if(ob&&!r[2].length)return;if(q&&r[0].toLowerCase().indexOf(q)<0)return;if(rules.size&&!r[2].some(f=>rules.has(f[0])))return;n++;if(n>400)return;
@@ -312,7 +312,7 @@ draw();
 
 $IndexTemplate=@'
 <!doctype html><meta charset=utf-8><title>CSDirector DB vs csdproj insights</title><style>@@CSS@@</style>
-<header><h1>CSDirector DB vs .csdproj insights <span class="badge b-warn">@@COUNT@@ projects</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. Pre-r7 DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@.</small></header>
+<header><h1>CSDirector DB vs .csdproj insights <span class="badge b-warn">@@COUNT@@ projects</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. Before 2024.r7 DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@.</small></header>
 <main><div class="cards">@@CARDS@@</div>
 <div class="tabs">@@TABS@@</div>
 <p><input type=text id=q placeholder="filter project number"> Issue: @@CHIPS@@</p>
@@ -408,7 +408,7 @@ foreach($w in $work){
  }) -join '')
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
- $meta='archive '+(Esc $o.archive)+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' pre-r7 DB-only (not counted)'
+ $meta='archive '+(Esc $o.archive)+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'
  $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@META@@',$meta).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
  WriteText (Join-Path $dir 'project.html') $page
  $results.Add($o)
@@ -427,10 +427,10 @@ if(-not $ProjectId -and $Limit -le 0){
 }
 }finally{$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
 
-$order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Pre-r7'=4;'DB only'=5}
+$order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Before 2024.r7'=4;'DB only'=5}
 $ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
 $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.state]++}
-$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Pre-r7','DB only')
+$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Before 2024.r7','DB only')
 $tabCount=$cnt
 $cards=(($tabNames | ForEach-Object {'<div class=card><b>'+$tabCount[$_]+'</b>'+$_+'</div>'}) -join '')
 $tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'">'+$_+' ('+$tabCount[$_]+')</div>'}) -join '')
