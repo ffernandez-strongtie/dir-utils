@@ -40,6 +40,7 @@ The script prompts for the projects root, SQL server, database, and output base 
 | `-ProjectId` | Restrict the scan to one or more project folder identifiers. |
 | `-Limit` | Include at most N projects. Archive projects come first, ranked by their newest eligible csdproj modification time descending; ties use project identifier. All archives for each selected project are included. Only after archive projects are exhausted do DB-only projects fill remaining slots, newest DB modification first. `0` means no limit. |
 | `-Evidence True` | Retain copied archives, extracted JSON, and detailed comparison inventories. Default: `False`. |
+| `-SqlUser` | Use SQL authentication with this login instead of Windows authentication. The password is read from the `CSD_SQL_PASSWORD` environment variable, never from a parameter. Use `setup-readonly-sql-login.ps1` (run in the VM as Administrator) to create a read-only `insights_ro` login. |
 | `-Timestamp` | Enable timestamp comparisons. Off by default. |
 | `-CheckDbOnlyDuplicates` | Run the suspected-duplicate piece check for DB projects without csdproj. Off by default: those projects show gray `-` duplicate counts with a note that the check was not run. |
 | `-FileTimeZone`, `-DatabaseTimeZone` | Interpret timestamps using the specified Windows time zones. Each defaults to the current machine's time zone. |

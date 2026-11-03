@@ -24,6 +24,7 @@ Use -FileTimeZone and -DatabaseTimeZone to override for data from another system
 param(
  [string]$ProjectsRoot='C:\SST\Server\Projects',
  [string]$Server='.\SST',
+ [string]$SqlUser,
  [string]$Database='CSDatabaseServer',
  [string]$OutputDirectory=(Join-Path (Get-Location).Path 'output'),
  [string[]]$ProjectId,
@@ -43,7 +44,7 @@ $ErrorActionPreference='Stop'
 $retainEvidence=[bool]::Parse($Evidence)
 Write-Host ''
 Write-Host 'CSDirector: Database and Project file Sync Report' -ForegroundColor Cyan
-Write-Host 'Searches project folders and compares archived trusses with SQL records using Windows authentication.'
+Write-Host ('Searches project folders and compares archived trusses with SQL records using '+$(if($SqlUser){'SQL authentication ('+$SqlUser+').'}else{'Windows authentication.'}))
 Write-Host 'Checks names, selected truss fields, individual truss-file checksums, estimated board footage, suspected duplicate DB pieces.'
  if($Timestamp){Write-Host 'Timestamp comparison is on.'}else{Write-Host 'Timestamp comparison is off. Add -Timestamp to include it.'}
 Write-Host 'Creates an HTML overview and a detail page per project in a timestamped output folder.'
@@ -66,13 +67,19 @@ foreach($inputName in @('ProjectsRoot','Server','Database','OutputDirectory')) {
 if($Server -ieq 'SST'){$Server='.\SST'}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $map=[ordered]@{Quantity='ComponentQuantity';NumPlies='TrussPlyCount';Thickness='TrussThicknessInches';OverallTrussHeight='OverallTrussHeightInches';LeftOverhang='LeftOverhangInches';RightOverhang='RightOverhangInches';LeftCantilever='LeftCantileverInches';RightCantilever='RightCantileverInches';LeftHeelHeight='LeftHeelHeightInches';RightHeelHeight='RightHeelHeightInches';PitchLeftTopOver12='LeftTopPitchOver12';PitchRightTopOver12='RightTopPitchOver12';PitchLeftBottomOver12='LeftBottomPitchOver12';PitchRightBottomOver12='RightBottomPitchOver12';IsAttic='IsAttic';IsGable='IsGable';IsGirder='IsGirder';IsFlipped='IsFlipped';OCSpacing='OCSpacing'}
+function SetSqlAuth($builder){
+ if($SqlUser){
+  if(-not $env:CSD_SQL_PASSWORD){throw 'Set the CSD_SQL_PASSWORD environment variable when using -SqlUser.'}
+  $builder['Integrated Security']=$false;$builder['User ID']=$SqlUser;$builder['Password']=$env:CSD_SQL_PASSWORD
+ }else{$builder['Integrated Security']=$true}
+}
 function ReadReportOwner($serverName,$databaseName,[string]$keyUpPath){
  $owner=[ordered]@{CompanyName=$null;CompanyNames=@();ReferenceNumber=$null;CompanySource='dbo.Company.Name (CompanyType: Our Company)';ReferenceSource=$keyUpPath;Notes=@()}
  $connection=[Data.SqlClient.SqlConnection]::new();$command=$null;$reader=$null
  try{
   $connectionSettings=[Data.SqlClient.SqlConnectionStringBuilder]::new()
   $connectionSettings['Data Source']=$serverName;$connectionSettings['Initial Catalog']=$databaseName
-  $connectionSettings['Integrated Security']=$true;$connectionSettings['Connect Timeout']=15
+  SetSqlAuth $connectionSettings;$connectionSettings['Connect Timeout']=15
   $connection.ConnectionString=$connectionSettings.ConnectionString;$connection.Open()
   $command=$connection.CreateCommand();$command.CommandTimeout=15
   $command.CommandText="SELECT DISTINCT c.Name FROM dbo.Company c JOIN dbo.CompanyType t ON t.CompanyTypeKey=c.CompanyTypeKey WHERE t.Name=N'Our Company'"
@@ -865,7 +872,7 @@ foreach($projectKey in $groups.Keys){
 $selectedIds=@($groups.Keys | Sort-Object @{Expression={$projectModified[$_]};Descending=$true},@{Expression={[string]$_}})
 if($Limit -gt 0){$selectedIds=@($selectedIds | Select-Object -First $Limit)}
 $conn=[Data.SqlClient.SqlConnection]::new()
-$builder=[Data.SqlClient.SqlConnectionStringBuilder]::new();$builder['Data Source']=$Server;$builder['Initial Catalog']=$Database;$builder['Integrated Security']=$true;$builder['Connect Timeout']=15;$conn.ConnectionString=$builder.ConnectionString
+$builder=[Data.SqlClient.SqlConnectionStringBuilder]::new();$builder['Data Source']=$Server;$builder['Initial Catalog']=$Database;SetSqlAuth $builder;$builder['Connect Timeout']=15;$conn.ConnectionString=$builder.ConnectionString
 $allSummary=[Collections.Generic.List[object]]::new();$links=[Collections.Generic.List[object]]::new()
 try{
  $conn.Open()
