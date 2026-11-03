@@ -42,7 +42,7 @@ $Rules=[ordered]@{
  'R-FLD'=@('Truss value differs','Mapped truss JSON field should equal its ComponentTruss/Component column (tolerance 0.001).')
 }
 $StaleRules=@('R-CKSUM','R-DB','R-FLD','R-VER','R-FILE')
-$Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Pre-r7'='b-pre';'Stale DB'='b-warn';'Not in DB'='b-warn'}
+$Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Pre-r7'='b-pre';'Stale DB'='b-warn';'Not in DB'='b-warn';'DB only'='b-pre'}
 
 function ParseVer($s){
  if($null -eq $s){return $null}
@@ -233,6 +233,7 @@ function VerdictOf($o,$st){
  switch($st){
   'Consistent'{"All $n trusses match."}
   'Not in DB'{'Archive exists, but the project is not in the DB'}
+  'DB only'{'In the DB, but no archive folder on disk. Not compared.'}
   'Pre-r7'{'Frozen pre-r7 DB state; no Studio files to compare.'}
   'Stale DB'{"DB older than the archive (re-saved in Studio). $($o.counts.stale) of $n trusses differ."}
   default{"$($o.counts.bad) of $n trusses have real mismatches."}
@@ -397,12 +398,23 @@ foreach($w in $work){
  $results.Add($o)
  $o.trusses=$null
 }
+if(-not $ProjectId -and $Limit -le 0){
+ $have=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+ foreach($w in $work){[void]$have.Add($w[0])}
+ $dbp=Q 'SELECT p.ProjectNumber,p.FilesCheckInId,(SELECT COUNT(*) FROM dbo.ComponentHeader h WHERE h.ProjectEventKey=p.EventKey) AS Trusses FROM dbo.Project p ORDER BY p.ProjectNumber' @{}
+ foreach($r in $dbp.Rows){
+  $pn=[string]$r['ProjectNumber']
+  if($have.Contains($pn)){continue}
+  $ci=if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']}
+  $results.Add(@{project=$pn;state='DB only';folder=$null;dbFilesCheckInId=$ci;counts=@{trusses=[int]$r['Trusses'];bad=0;stale=0;pre=0};cats=[ordered]@{}})
+ }
+}
 }finally{$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
 
-$order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Pre-r7'=4}
+$order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Pre-r7'=4;'DB only'=5}
 $ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
 $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.state]++}
-$tabNames=@('All','Inconsistent','Stale DB','Not in DB','Consistent','Pre-r7')
+$tabNames=@('All','Inconsistent','Stale DB','Not in DB','Consistent','Pre-r7','DB only')
 $tabCount=@{All=$ranked.Count}+$cnt
 $cards=(($tabNames | ForEach-Object {'<div class=card><b>'+$tabCount[$_]+'</b>'+$_+'</div>'}) -join '')
 $tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'All'){' on'}else{''})+'" data-t="'+$_+'">'+$_+' ('+$tabCount[$_]+')</div>'}) -join '')
@@ -410,7 +422,7 @@ $allChips=(($Rules.Values | ForEach-Object {'<span class="chip" data-c="'+(Esc $
 $sb=[Text.StringBuilder]::new()
 foreach($o in $ranked){
  $top=(($o.cats.GetEnumerator() | Sort-Object @{Expression={-$_.Value}},@{Expression={$_.Key}} | Select-Object -First 2 | ForEach-Object {'<span class="badge b-pre">'+(Esc $_.Key)+' '+$_.Value+'</span>'}) -join '')
- [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td><a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a></td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
+ [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
 }
 $index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@CARDS@@',$cards).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString())
 WriteText (Join-Path $outDir 'index.html') $index
