@@ -25,6 +25,25 @@ param(
  [ValidateRange(0,2147483647)][int]$Limit=0
 )
 $ErrorActionPreference='Stop'
+Write-Host ''
+Write-Host 'CSDirector: Database and Project file Insights' -ForegroundColor Cyan
+Write-Host ('Compares DB trusses with TrussStudio files in each .csdproj using '+$(if($SqlUser){'SQL authentication ('+$SqlUser+').'}else{'Windows authentication.'}))
+Write-Host 'Archives and database records are read only.'
+Write-Host 'Press Enter to accept each default shown in brackets. Command-line values skip their prompts.'
+Write-Host ''
+foreach($inputName in @('ProjectsRoot','Server','Database','OutputDirectory')) {
+ if(-not $PSBoundParameters.ContainsKey($inputName)) {
+  $defaultValue=Get-Variable -Name $inputName -ValueOnly
+  $label=switch($inputName){
+   'ProjectsRoot' {'Projects folder'}
+   'Server' {'SQL server / instance'}
+   'Database' {'Database name'}
+   'OutputDirectory' {'Output folder base (timestamp appended)'}
+  }
+  $answer=Read-Host ($label+' ['+$defaultValue+']')
+  if(-not [string]::IsNullOrWhiteSpace($answer)){Set-Variable -Name $inputName -Value $answer.Trim()}
+ }
+}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 if($Server -ieq 'SST'){$Server='.\SST'}
 $Groups=@('Identity','Version','Geometry','Pitch','Flags')
@@ -303,25 +322,6 @@ $IndexTemplate=@'
 document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x==e));f()});document.querySelectorAll('.chip').forEach(e=>e.onclick=()=>{const c=e.dataset.c;cs.has(c)?cs.delete(c):cs.add(c);e.classList.toggle('on');f()});document.getElementById('q').oninput=f;</script>
 '@
 
-Write-Host ''
-Write-Host 'CSDirector: Database and Project file Insights' -ForegroundColor Cyan
-Write-Host ('Compares DB trusses with TrussStudio files in each .csdproj using '+$(if($SqlUser){'SQL authentication ('+$SqlUser+').'}else{'Windows authentication.'}))
-Write-Host 'Archives and database records are read only.'
-Write-Host 'Press Enter to accept each default shown in brackets. Command-line values skip their prompts.'
-Write-Host ''
-foreach($inputName in @('ProjectsRoot','Server','Database','OutputDirectory')) {
- if(-not $PSBoundParameters.ContainsKey($inputName)) {
-  $defaultValue=Get-Variable -Name $inputName -ValueOnly
-  $label=switch($inputName){
-   'ProjectsRoot' {'Projects folder'}
-   'Server' {'SQL server / instance'}
-   'Database' {'Database name'}
-   'OutputDirectory' {'Output folder base (timestamp appended)'}
-  }
-  $answer=Read-Host ($label+' ['+$defaultValue+']')
-  if(-not [string]::IsNullOrWhiteSpace($answer)){Set-Variable -Name $inputName -Value $answer.Trim()}
- }
-}
 if($Server -ieq 'SST'){$Server='.\SST'}
 $cut=ParseVer $LegacyCutoffVersion
 $root=(Get-Item -LiteralPath $ProjectsRoot).FullName.TrimEnd('\')
