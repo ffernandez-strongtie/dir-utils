@@ -136,6 +136,34 @@ function CompareAnalysisVersion($a,$b){
  for($i=0;$i -lt 4;$i++){if($a[$i] -lt $b[$i]){return -1};if($a[$i] -gt $b[$i]){return 1}}
  0
 }
+function TrussVersionItems($rows){
+ $counts=[ordered]@{}
+ foreach($record in $rows){$text=if($null -eq $record.AnalysisVersion -or $record.AnalysisVersion -is [DBNull]){''}else{([string]$record.AnalysisVersion).Trim()};$counts[$text]=[int]$counts[$text]+1}
+ @(foreach($key in $counts.Keys){[pscustomobject]@{Text=[string]$key;Count=[int]$counts[$key]}})
+}
+function TrussVersionSummary($items,[string]$cutoffVersion){
+ $cutoff=ParseAnalysisVersion $cutoffVersion
+ $entries=@(foreach($item in @($items)){
+  $parsed=if($item.Text){ParseAnalysisVersion $item.Text}else{$null}
+  $pre=if($null -ne $parsed -and $null -ne $cutoff){(CompareAnalysisVersion $parsed $cutoff) -lt 0}else{$null}
+  $label=if($item.Text){$item.Text}else{'Unknown'}
+  [pscustomobject]@{Version=$label;Count=[int]$item.Count;PreCutoff=$pre;Sort=$parsed}
+ })
+ $sorted=@($entries | Sort-Object @{Expression={if($_.Sort){0}else{1}}},@{Expression={if($_.Sort){$_.Sort[0]}else{0}}},@{Expression={if($_.Sort){$_.Sort[1]}else{0}}},@{Expression={if($_.Sort){$_.Sort[2]}else{0}}},@{Expression={if($_.Sort){$_.Sort[3]}else{0}}},@{Expression={$_.Version}})
+ $era=''
+ if($sorted.Count){
+  $unknown=@($sorted | Where-Object {$null -eq $_.PreCutoff}).Count
+  $preCount=@($sorted | Where-Object {$_.PreCutoff -eq $true}).Count
+  $era=if($unknown){'Unknown'}elseif($preCount -eq $sorted.Count){'All pre-cutoff'}elseif($preCount -eq 0){'All current'}else{'Mixed'}
+ }
+ [pscustomobject]@{Versions=@($sorted | ForEach-Object {[pscustomobject]@{Version=$_.Version;Count=$_.Count;PreCutoff=$_.PreCutoff}});Era=$era}
+}
+function VersionCell($row){
+ if($null -eq $row.TrussVersions -or [string]::IsNullOrEmpty($row.VersionEra)){return '<td class="unknown">-</td>'}
+ $class=switch($row.VersionEra){'All pre-cutoff'{'older'} 'Mixed'{'mixed'} 'All current'{'close'} default{'unknown'}}
+ $lines=@($row.TrussVersions | ForEach-Object {(Enc $_.Version)+' ('+$_.Count+')'}) -join '<br>'
+ '<td class="'+$class+'" style="white-space:nowrap"><b>'+(Enc $row.VersionEra)+'</b><br>'+$lines+'</td>'
+}
 function LegacyAssessment($projectTable,$databaseRows,$pieceTable,[bool]$archiveComplete,[int]$jsonTrusses,[datetime]$cutoff,[string]$cutoffVersion){
  $result=[ordered]@{IsLegacy=$false;LatestDatabaseModified=$null;CutoffDate=$cutoff.Date;Reason='';Basis='';VersionEvidence=''}
  if(-not $archiveComplete -or $jsonTrusses -ne 0 -or $projectTable.Rows.Count -ne 1 -or @($databaseRows).Count -eq 0 -or $null -eq $pieceTable){return [pscustomobject]$result}
@@ -202,8 +230,14 @@ function StatusHtml($row){
   if($row.($pair[0]) -gt 0){$parts.Add('<div class="'+$pair[1]+'" style="padding:5px;margin:3px 0">'+$pair[0]+': '+$row.($pair[0])+'</div>')}
  }
  }
- if(-not $parts.Count){if($row.Status -eq 'Healthy'){return 'Needs review'};return Enc $row.Status}
- $parts -join ''
+ $mixedNote=''
+ if($row.VersionEra -eq 'Mixed'){
+  $preTrusses=0;$allTrusses=0
+  foreach($v in @($row.TrussVersions)){$allTrusses+=[int]$v.Count;if($v.PreCutoff -eq $true){$preTrusses+=[int]$v.Count}}
+  $mixedNote='<div class="mixed" style="padding:5px;margin:3px 0">Mixed versions: '+$preTrusses+' of '+$allTrusses+' trusses analyzed before 2024.r7</div>'
+ }
+ if(-not $parts.Count){if($row.Status -eq 'Healthy'){return 'Needs review'+$mixedNote};return (Enc $row.Status)+$mixedNote}
+ ($parts -join '')+$mixedNote
 }
 function ReadArchiveXml($entry){
  $settings=[Xml.XmlReaderSettings]::new();$settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit;$settings.XmlResolver=$null
@@ -546,7 +580,15 @@ body.overview-page{height:100vh;height:100dvh;box-sizing:border-box;margin:0;pad
 .overview-page>.report-legend[open]>summary::before{transform:rotate(90deg)}
 .overview-page .legend-summary-label{min-width:0}
 .overview-page .legend-run-context{margin-left:auto;text-align:right;font-size:13px;font-weight:400;color:#536475;overflow-wrap:anywhere}
-.overview-page>.overview-table{flex:1;min-height:0;max-height:none;margin:0;overflow:auto}
+.overview-page .tab-bar{display:flex;gap:4px;flex-wrap:wrap;flex-shrink:0;border-bottom:2px solid #c8d2df}
+.overview-page .tab{font:inherit;background:#e8eef5;border:1px solid #c8d2df;border-bottom:none;border-radius:6px 6px 0 0;padding:7px 12px;cursor:pointer;color:#243348}
+.overview-page .tab[aria-selected=true]{background:#33465c;color:#fff;font-weight:700}
+.overview-page .tab.empty{opacity:.55}
+.overview-page .tab-count{background:rgba(0,0,0,.12);border-radius:10px;padding:1px 7px;font-size:12px;margin-left:4px}
+.overview-page .tab-panel{flex:1;min-height:0;display:flex;flex-direction:column}
+.overview-page .tab-panel[hidden]{display:none}
+.overview-page .tab-panel .overview-table{flex:1;min-height:0;max-height:none;margin:0;overflow:auto}
+.overview-page .tab-empty{margin:12px 0;color:#536475}
 @media(max-width:800px){body.overview-page{padding:10px}.overview-page .report-header h2{font-size:20px}.overview-page .legend-run-context{flex-basis:100%}}
 </style>
 '@
@@ -567,7 +609,7 @@ function ReportLegend($fileZoneName,$databaseZoneName,[double]$timestampToleranc
 <section class="legend-card"><h3><span class="legend-number">5</span>DB row duplicates &mdash; is piece data repeated?</h3><ul><li><span class="legend-key">Affected trusses:</span> DB trusses containing repeated piece data.</li><li><span class="legend-key">Extra piece rows:</span> repetitions beyond the first copy. Three identical rows count as two extra rows.</li><li>Counts cover all DB trusses in the project, including trusses missing from the csdproj.</li></ul><div class="legend-tags"><span class="legend-tag error">Red: suspected duplicates found</span></div><p>These counts refer to suspected duplicate piece rows within a DB truss, not duplicates across every DB table. They are candidates for review, not confirmed errors. The project page shows the matching records and their identifiers. For DB projects without csdproj, this check is skipped by default: their duplicate counts show gray <code>-</code> with a note explaining the check was not run. Enable it with <code>-CheckDbOnlyDuplicates</code>.</p><details><summary>What makes two piece rows a suspected duplicate?</summary><ul><li>They belong to the same DB truss (ComponentKey), and all stored business values match exactly: geometry, engineering label, lumber/pricing references, dimensions, lengths, plies and calculated footage/cost values.</li><li>Record IDs and creation/modification dates and users are excluded from matching.</li><li>Comparisons are case-sensitive and use no numeric tolerance. Pieces with differing business values are not counted.</li><li>Counts identify distinct truss component IDs and repeat for each archive of the same DB project. Legitimate repetitions require manual review.</li><li>Missing/ambiguous DB projects or a failed piece query produce unavailable counts, not zero duplicates.</li></ul></details></section>
 <section class="legend-card"><h3><span class="legend-number">6</span>Timestamps &mdash; which date is earlier?</h3><ul><li><span class="legend-key">Older:</span> the JSON timestamp inside the csdproj is earlier than the DB truss timestamp by more than $secondsLabel seconds.</li><li><span class="legend-key">Close:</span> the two timestamps are within $secondsLabel seconds.</li><li><span class="legend-key">Newer:</span> the JSON timestamp is later than the DB truss timestamp by more than $secondsLabel seconds.</li><li><span class="legend-key">Minimum / maximum difference:</span> the smallest / largest signed JSON-minus-DB time gap. <b>&minus;2d</b> means two days earlier; <b>+2d</b> means two days later.</li></ul><div class="legend-tags"><span class="legend-tag older">Amber: older</span><span class="legend-tag close">Green: close</span><span class="legend-tag newer">Blue: newer</span><span class="legend-tag mixed">Purple: both older and newer</span><span class="legend-tag unknown">Gray: unavailable</span></div><p>Dates are investigation clues. They do not prove an older/newer truss version or explain the cause of a difference.</p><details><summary>Timestamp comparison rules</summary><ul><li>These counts cover matched trusses only and compare ZIP-entry JSON timestamps with <code>ComponentTruss.LastModifiedDateTime</code>, not the outer csdproj file's save date.</li><li>Timestamp counts overlap field-comparison counts. Purple in Status means some matched JSON timestamps are older and others are newer.</li><li>Missing JSON, missing DB times, or ambiguous/invalid daylight-saving times make the comparison unavailable.</li><li>Signed difference colors indicate earlier/later even within tolerance. Processing errors take priority over timestamp hints.</li><li>Packaging can affect how timestamps are represented. Review the original archive metadata before using dates as root-cause evidence.</li></ul></details></section>
 <section class="legend-card"><h3><span class="legend-number">7</span>Review markers &mdash; a separate review check</h3><ul><li><span class="legend-key">Review markers differ:</span> matched trusses whose CSEngineer review/sealing marker differs between JSON and the DB.</li><li>This marker is assigned by the external review program. It is not the file checksum and does not by itself establish a design difference.</li></ul><details><summary>Technical field</summary><p>The value compared is <code>TrussMatchCode</code>. Marker-only differences are counted in the summary but excluded from the main difference detail list.</p></details></section>
-<section class="legend-card"><h3><span class="legend-number">8</span>Status and unresolved comparisons &mdash; what needs review?</h3><ul><li><span class="legend-key">Status:</span> reports inventory/field/file agreement alongside a separate BDFT result, and highlights missing trusses, processing problems and timestamp direction. Several messages may appear together.</li><li><span class="legend-key">Unresolved comparisons:</span> trusses that could not be compared reliably. These are not confirmed data differences.</li><li><span class="legend-key">Unavailable / Unknown:</span> insufficient information to complete that check. This does not mean the values agree.</li></ul><details><summary>Common reasons and overview sections</summary><ul><li>Duplicate JSON/tdlTruss names, multiple matching DB trusses or project records, missing required JSON, or no usable checked fields can leave a comparison unresolved.</li><li>Parsing and processing errors are reported separately. Review the project page for the reason.</li><li><b>Results:</b> projects with comparison data or issues.</li><li><b>Project not in DB:</b> no DB project matches the folder's identifier, even if the file counts are zero.</li><li><b>Legacy [2024.r7]:</b> no truss JSON and every DB truss has a parseable <code>ComponentTruss.AnalysisVersion</code> below the configured cutoff version (default 2024.7.2.7). This is recorded evidence, not a date guess. If all versions are known and any truss is at or above the cutoff, the project is compared normally.</li><li><b>Possibly Legacy [2024.r7]:</b> used only when a truss version is missing or unparseable: no truss JSON and known project/truss/piece database modification dates on or before the configured cutoff. Yellow rows are excluded from comparison because pre-2024.r7 values lived in the database. The actual customer upgrade date is unknown; this is an inference, not a verified version check. Newer or undated projects without JSON remain unresolved.</li><li><b>Empty:</b> projects with no trusses to compare.</li><li><b>DB projects without csdproj:</b> database projects with no eligible archive under the scanned root, listed after Empty and sorted by DB project modification time. This check uses the full archive inventory to identify missing files, respects -ProjectId, and fills only remaining -Limit slots after archive projects are exhausted.</li></ul></details></section>
+<section class="legend-card"><h3><span class="legend-number">8</span>Status and unresolved comparisons &mdash; what needs review?</h3><ul><li><span class="legend-key">Status:</span> reports inventory/field/file agreement alongside a separate BDFT result, and highlights missing trusses, processing problems and timestamp direction. Several messages may appear together.</li><li><span class="legend-key">Unresolved comparisons:</span> trusses that could not be compared reliably. These are not confirmed data differences.</li><li><span class="legend-key">Unavailable / Unknown:</span> insufficient information to complete that check. This does not mean the values agree.</li></ul><details><summary>Common reasons and overview sections</summary><ul><li>Duplicate JSON/tdlTruss names, multiple matching DB trusses or project records, missing required JSON, or no usable checked fields can leave a comparison unresolved.</li><li>Parsing and processing errors are reported separately. Review the project page for the reason.</li><li><b>Results:</b> projects with comparison data or issues.</li><li><b>Project not in DB:</b> no DB project matches the folder's identifier, even if the file counts are zero.</li><li><b>Truss versions:</b> every distinct <code>ComponentTruss.AnalysisVersion</code> found in the project's DB trusses, one per line with the truss count. The bold label compares them with the cutoff version: <b>All pre-cutoff</b>, <b>Mixed</b> (compared normally and flagged), <b>All current</b>, or <b>Unknown</b> (a version is missing or unparseable).</li><li><b>Tabs:</b> each section above is a tab with its project count; the selected tab is kept in the page address.</li><li><b>Legacy [2024.r7]:</b> no truss JSON and every DB truss has a parseable <code>ComponentTruss.AnalysisVersion</code> below the configured cutoff version (default 2024.7.2.7). This is recorded evidence, not a date guess. If all versions are known and any truss is at or above the cutoff, the project is compared normally.</li><li><b>Possibly Legacy [2024.r7]:</b> used only when a truss version is missing or unparseable: no truss JSON and known project/truss/piece database modification dates on or before the configured cutoff. Yellow rows are excluded from comparison because pre-2024.r7 values lived in the database. The actual customer upgrade date is unknown; this is an inference, not a verified version check. Newer or undated projects without JSON remain unresolved.</li><li><b>Empty:</b> projects with no trusses to compare.</li><li><b>DB projects without csdproj:</b> database projects with no eligible archive under the scanned root, listed after Empty and sorted by DB project modification time. This check uses the full archive inventory to identify missing files, respects -ProjectId, and fills only remaining -Limit slots after archive projects are exhausted.</li></ul></details></section>
 </div>
 <p><b>Report rows:</b> each row represents one project and one csdproj archive. Multiple archives for a project stay separate to preserve their saved states. Click a project name to open its details.</p><div class="legend-foot"><span><b>0</b> = an actual count of zero</span><span><b>&mdash;</b> = unavailable or no comparison could be made</span><span>Open a project to review the supporting details.</span></div>
 <details class="legend-settings"><summary>Technical settings for this run</summary><ul><li>Timestamp tolerance: <b>$secondsLabel seconds</b>.</li><li>Numeric field tolerance: <code>$numberLabel</code>.</li><li>csdproj JSON timestamp timezone: <b>$fileLabel</b>.</li><li>DB timestamp timezone: <b>$databaseLabel</b>.</li><li>Both timezone interpretations default to the machine's current timezone when the script runs. <code>-FileTimeZone</code> and <code>-DatabaseTimeZone</code> can override them independently.</li><li>Processing is read-only. Original csdproj files and DB records are unchanged; DeletedProjects folders and Attachment_/Attachments_ archives are skipped.</li></ul></details>
@@ -585,7 +627,7 @@ function ReportLegend($fileZoneName,$databaseZoneName,[double]$timestampToleranc
  $html
 }
 function SummaryHeader([switch]$Overview) {
- $header='<table class="grouped-summary"><thead><tr><th rowspan="3">Project</th><th rowspan="3">csdproj</th><th rowspan="3" class="status-column">Status</th><th colspan="4" style="background:#e3edf7">Truss inventory</th><th colspan="2" style="background:#e8eef0">Field sync comparison</th><th colspan="4" style="background:#e4ecf0">Truss file checksum</th><th colspan="4" style="background:#e6eee1">BDFT comparison</th><th colspan="2" style="background:#f4e6e4">DB row duplicates</th><th colspan="6" style="background:#eee8f6">Timestamps - in both only</th><th rowspan="3">Review markers differ</th><th rowspan="3">Unresolved comparisons</th></tr><tr><th colspan="2" scope="colgroup">csdproj</th><th rowspan="2" scope="col">DB</th><th rowspan="2" scope="col" class="key-inventory">In both</th><th rowspan="2" class="key-data">Same</th><th rowspan="2">Different</th><th rowspan="2" class="key-checksum">Same</th><th rowspan="2">Different</th><th rowspan="2">File Missing</th><th rowspan="2">Not checked</th><th rowspan="2">csdproj</th><th rowspan="2">DB (calculated)</th><th rowspan="2">Difference</th><th rowspan="2">DB (As stored)</th><th rowspan="2">Affected trusses</th><th rowspan="2">Extra piece rows</th><th rowspan="2">Older</th><th rowspan="2">Close</th><th rowspan="2">Newer</th><th rowspan="2">Unavailable</th><th rowspan="2">Minimum difference</th><th rowspan="2">Maximum difference</th></tr><tr><th scope="col">JSON</th><th scope="col">tdlTruss</th></tr></thead><tbody>'
+ $header='<table class="grouped-summary"><thead><tr><th rowspan="3">Project</th><th rowspan="3">csdproj</th><th rowspan="3" class="status-column">Status</th><th rowspan="3">Truss versions</th><th colspan="4" style="background:#e3edf7">Truss inventory</th><th colspan="2" style="background:#e8eef0">Field sync comparison</th><th colspan="4" style="background:#e4ecf0">Truss file checksum</th><th colspan="4" style="background:#e6eee1">BDFT comparison</th><th colspan="2" style="background:#f4e6e4">DB row duplicates</th><th colspan="6" style="background:#eee8f6">Timestamps - in both only</th><th rowspan="3">Review markers differ</th><th rowspan="3">Unresolved comparisons</th></tr><tr><th colspan="2" scope="colgroup">csdproj</th><th rowspan="2" scope="col">DB</th><th rowspan="2" scope="col" class="key-inventory">In both</th><th rowspan="2" class="key-data">Same</th><th rowspan="2">Different</th><th rowspan="2" class="key-checksum">Same</th><th rowspan="2">Different</th><th rowspan="2">File Missing</th><th rowspan="2">Not checked</th><th rowspan="2">csdproj</th><th rowspan="2">DB (calculated)</th><th rowspan="2">Difference</th><th rowspan="2">DB (As stored)</th><th rowspan="2">Affected trusses</th><th rowspan="2">Extra piece rows</th><th rowspan="2">Older</th><th rowspan="2">Close</th><th rowspan="2">Newer</th><th rowspan="2">Unavailable</th><th rowspan="2">Minimum difference</th><th rowspan="2">Maximum difference</th></tr><tr><th scope="col">JSON</th><th scope="col">tdlTruss</th></tr></thead><tbody>'
  if(-not $Timestamp){
   $header=$header.Replace('<th colspan="6" style="background:#eee8f6">Timestamps - in both only</th>','').Replace('<th rowspan="2">Older</th><th rowspan="2">Close</th><th rowspan="2">Newer</th><th rowspan="2">Unavailable</th><th rowspan="2">Minimum difference</th><th rowspan="2">Maximum difference</th>','')
  }
@@ -613,7 +655,7 @@ function SummaryRow($row,$href='',[switch]$Overview) {
   }
   $archiveCell=if($row.NoCsdproj){'<td class="unknown">-</td>'}else{'<td>'+(Enc $row.csdproj)+'</td>'}
   $statusCell=if($row.LegacyPre2024R7){'<td class="status-column notice">'+(StatusHtml $row)+'</td>'}else{'<td class="status-column unknown">No csdproj found</td>'}
-  $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td>'+$archiveCell+$statusCell)
+  $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td>'+$archiveCell+$statusCell+(VersionCell $row))
   $columns=@('JsonTrussCount','TdlTrussCount','DbTrussCount','TdlMatchedNames','Data synced','Data differs','ChecksumSame','ChecksumDifferent','ChecksumMissing','ChecksumUnavailable','CsdprojBoardFeet','DatabaseOnFileBasisBoardFeet','SameBasisBoardFeetDifference','DatabaseBoardFeet','DuplicateAffectedTrusses','DuplicateExtraPieceRows')
   if($Timestamp){$columns+=@('Older Timestamp','Within tolerance','Newer Timestamp','Unavailable','Minimum difference','Maximum difference')}
   $columns+=@('Review marker differs','Ambiguous')
@@ -626,7 +668,7 @@ function SummaryRow($row,$href='',[switch]$Overview) {
   }
   $null=$b.Append('</tr>');return $b.ToString()
  }
- $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td>')
+ $b=[Text.StringBuilder]::new();$null=$b.Append('<tr>'+$modifiedCell+'<td>'+$project+'</td><td>'+(Enc $row.csdproj)+'</td><td class="status-column">'+$status+'</td>'+(VersionCell $row))
  for($i=0;$i -lt $inventory.Count;$i++){
   $class=''
   if($i -eq 0 -and $null -ne $row.JsonTrussCount -and $null -ne $row.TdlTrussCount -and $row.JsonTrussCount -ne $row.TdlTrussCount){$class='older'}
@@ -766,8 +808,29 @@ $style+='<style>.report-header{display:flex;align-items:flex-start;justify-conte
 $style+=(ReportLegendStyle)
 $legend=ReportLegend $FileTimeZone $DatabaseTimeZone $ToleranceSeconds $NumericTolerance
 $stickyHeaderScript=@'
-<script>(function(){function sizeHeaders(){document.querySelectorAll(".grouped-summary").forEach(function(t){var rows=Array.from(t.querySelectorAll("thead tr")),offset=0;rows.forEach(function(row,index){Array.from(row.children).forEach(function(cell){cell.style.top=offset+"px";cell.style.zIndex=String(rows.length-index+3)});offset+=row.getBoundingClientRect().height})})}window.addEventListener("resize",sizeHeaders);window.addEventListener("load",sizeHeaders);sizeHeaders()})();</script>
+<script>(function(){function sizeHeaders(){document.querySelectorAll(".grouped-summary").forEach(function(t){var rows=Array.from(t.querySelectorAll("thead tr")),offset=0;rows.forEach(function(row,index){Array.from(row.children).forEach(function(cell){cell.style.top=offset+"px";cell.style.zIndex=String(rows.length-index+3)});offset+=row.getBoundingClientRect().height})})}window.sizeSummaryHeaders=sizeHeaders;window.addEventListener("resize",sizeHeaders);window.addEventListener("load",sizeHeaders);sizeHeaders()})();</script>
 '@
+function OverviewTabsHtml($sections,[string]$defaultId){
+ $tabs=[Text.StringBuilder]::new();$panels=[Text.StringBuilder]::new()
+ $null=$tabs.Append('<div class="tab-bar" role="tablist" data-default="'+(Enc $defaultId)+'">')
+ foreach($section in $sections){
+  $sectionLinks=@($section.Links)
+  $emptyClass=if($sectionLinks.Count){''}else{' empty'}
+  $null=$tabs.Append('<button type="button" class="tab'+$emptyClass+'" role="tab" data-tab="'+$section.Id+'" aria-selected="false">'+(Enc $section.Title)+' <span class="tab-count">'+$sectionLinks.Count+'</span></button>')
+  $null=$panels.Append('<div class="tab-panel" role="tabpanel" id="tab-'+$section.Id+'" hidden>')
+  if($sectionLinks.Count){
+   $null=$panels.Append('<div class="scroll overview-table">'+(SummaryHeader -Overview))
+   foreach($link in @($sectionLinks | Sort-Object @{Expression={if($_.Summary.NoCsdproj){$_.Summary.LatestDatabaseModified}else{$_.Summary.CsdprojLastModifiedUtc}};Descending=$true},@{Expression={$_.Summary.Project}},@{Expression={$_.Summary.csdproj}})){$null=$panels.Append((SummaryRow $link.Summary ('projects/'+[uri]::EscapeDataString($link.Page)) -Overview))}
+   $null=$panels.Append('</tbody></table></div>')
+  }else{$null=$panels.Append('<p class="tab-empty">No projects in this section.</p>')}
+  $null=$panels.Append('</div>')
+ }
+ $null=$tabs.Append('</div>')
+ $tabScript=@'
+<script>(function(){var bar=document.querySelector(".tab-bar"),tabs=Array.from(bar.querySelectorAll(".tab")),panels=Array.from(document.querySelectorAll(".tab-panel"));function show(id,save){if(!tabs.some(function(t){return t.dataset.tab===id})){id=bar.dataset.default}tabs.forEach(function(t){t.setAttribute("aria-selected",t.dataset.tab===id?"true":"false")});panels.forEach(function(p){p.hidden=p.id!=="tab-"+id});if(save){history.replaceState(null,"","#"+id)}if(window.sizeSummaryHeaders){window.sizeSummaryHeaders()}}tabs.forEach(function(t){t.addEventListener("click",function(){show(t.dataset.tab,true)})});window.addEventListener("hashchange",function(){show(location.hash.slice(1),false)});show(location.hash.slice(1),false)})();</script>
+'@
+ $tabs.ToString()+$panels.ToString()+$tabScript
+}
 function Page($title,$body,$path,[switch]$Overview){
  $heading=if($Overview){'h2'}else{'h1'}
  $bodyAttribute=if($Overview){' class="overview-page"'}else{''}
@@ -943,6 +1006,9 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    $s | Add-Member -NotePropertyName BoardFeetQuantityDifferences -NotePropertyValue $fileBasisComparison.QuantityDifferences
    $s | Add-Member -NotePropertyName BoardFeetSettingsDifferent -NotePropertyValue $fileBasisComparison.SettingsDifferent
    $s | Add-Member -NotePropertyName SameBasisBoardFeetNote -NotePropertyValue $fileBasisComparison.Note
+   $versionSummary=TrussVersionSummary (TrussVersionItems $dbt.Rows) $LegacyCutoffVersion
+   $s | Add-Member -NotePropertyName TrussVersions -NotePropertyValue $versionSummary.Versions
+   $s | Add-Member -NotePropertyName VersionEra -NotePropertyValue $versionSummary.Era
    $legacy=LegacyAssessment $pt $dbt.Rows $pieceTable ($errors.Count -eq 0 -and $null -ne $tdlCount) $count.JsonTrusses $LegacyCutoffDate $LegacyCutoffVersion
    $s | Add-Member -NotePropertyName LegacyPre2024R7 -NotePropertyValue $legacy.IsLegacy
    $s | Add-Member -NotePropertyName LegacyBasis -NotePropertyValue $legacy.Basis
@@ -953,7 +1019,7 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
     $s.Status=if($legacy.Basis -eq 'AnalysisVersion'){'Legacy [2024.r7]'}else{'Possibly Legacy [2024.r7]'}
     # Suppress numeric comparison outcomes in JSON as well as the HTML/console.
     foreach($property in @($s.PSObject.Properties.Name)){
-     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','LegacyPre2024R7','LegacyBasis','LegacyVersionEvidence','LegacyReason','LatestDatabaseModified','JsonTrussCount','TdlTrussCount','DbTrussCount','DatabaseBoardFeet','DatabaseBoardFeetBasis','DatabasePieceBoardFeetBasis','BoardFeetBasisNote','DuplicateAffectedTrusses','DuplicateExtraPieceRows')){$s.$property=$null}
+     if($property -notin @('Project','csdproj','CsdprojLastModifiedUtc','Status','TrussVersions','VersionEra','LegacyPre2024R7','LegacyBasis','LegacyVersionEvidence','LegacyReason','LatestDatabaseModified','JsonTrussCount','TdlTrussCount','DbTrussCount','DatabaseBoardFeet','DatabaseBoardFeetBasis','DatabasePieceBoardFeetBasis','BoardFeetBasisNote','DuplicateAffectedTrusses','DuplicateExtraPieceRows')){$s.$property=$null}
     }
    }
    $dataChecksHealthy=HealthyProject $s
@@ -996,6 +1062,19 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
  try{
   $missingArchiveCommand.CommandText='SELECT p.EventKey,p.ProjectNumber,p.CachedBoardFeet,e.LastModifiedDateTime AS ProjectModified,COALESCE(tc.TrussCount,0) AS TrussCount FROM dbo.Project p LEFT JOIN dbo.Event e ON e.EventKey=p.EventKey LEFT JOIN (SELECT h.ProjectEventKey,COUNT(*) AS TrussCount FROM dbo.ComponentHeader h JOIN dbo.ComponentTruss t ON t.ComponentKey=h.ComponentHeaderKey GROUP BY h.ProjectEventKey) tc ON tc.ProjectEventKey=p.EventKey ORDER BY e.LastModifiedDateTime DESC,p.ProjectNumber,p.EventKey'
   $missingArchiveReader=$missingArchiveCommand.ExecuteReader();$databaseProjects=[Data.DataTable]::new();$databaseProjects.Load($missingArchiveReader)
+  Write-Progress -Id 1 -Activity 'DB projects without csdproj' -Status 'Querying truss versions'
+  $dbVersionItems=@{};$versionCommand=$conn.CreateCommand();$versionCommand.CommandTimeout=120;$versionReader=$null
+  try{
+   $versionCommand.CommandText='SELECT h.ProjectEventKey,LTRIM(RTRIM(CAST(ct.AnalysisVersion AS nvarchar(50)))) AS AnalysisVersion,COUNT(*) AS TrussCount FROM dbo.ComponentHeader h JOIN dbo.ComponentTruss ct ON ct.ComponentKey=h.ComponentHeaderKey GROUP BY h.ProjectEventKey,LTRIM(RTRIM(CAST(ct.AnalysisVersion AS nvarchar(50))))'
+   $versionReader=$versionCommand.ExecuteReader();$versionTable=[Data.DataTable]::new();$versionTable.Load($versionReader)
+   foreach($versionRow in $versionTable.Rows){
+    $versionKey=([guid]$versionRow.ProjectEventKey).ToString()
+    if(-not $dbVersionItems.ContainsKey($versionKey)){$dbVersionItems[$versionKey]=[Collections.Generic.List[object]]::new()}
+    $versionText=if($versionRow.AnalysisVersion -is [DBNull]){''}else{[string]$versionRow.AnalysisVersion}
+    $dbVersionItems[$versionKey].Add([pscustomobject]@{Text=$versionText;Count=[int]$versionRow.TrussCount})
+   }
+  }catch{Write-Warning ('Truss version query failed: '+$_.Exception.Message)}
+  finally{if($versionReader){$versionReader.Dispose()};$versionCommand.Dispose()}
   foreach($dbProject in $databaseProjects.Rows){
    if($Limit -gt 0 -and ($selectedIds.Count+$missingArchiveAdded) -ge $Limit){break}
    $dbScanIndex++;if($dbScanIndex % 10 -eq 1){Write-Progress -Id 1 -Activity 'DB projects without csdproj' -Status "Scanned $dbScanIndex of $($databaseProjects.Rows.Count); reported $missingArchiveAdded" -PercentComplete ($dbScanIndex*100/[math]::Max(1,$databaseProjects.Rows.Count))}
@@ -1014,7 +1093,8 @@ foreach($field in @('HeaderModified','ComponentModified','LastModifiedDateTime')
    }catch{$dbOnlyDuplicates.Note='DB piece duplicate check unavailable: '+$_.Exception.Message}
    finally{if($dbOnlyReader){$dbOnlyReader.Dispose()};$dbOnlyCommand.Dispose()}
    }
-   $missingSummary=[pscustomobject][ordered]@{Project=$displayNumber;ProjectEventKey=[string]$dbProject.EventKey;csdproj=$null;CsdprojLastModifiedUtc=$null;Status='No csdproj found';NoCsdproj=$true;DatabaseBoardFeet=if($dbProject.CachedBoardFeet -is [DBNull]){$null}else{[decimal]$dbProject.CachedBoardFeet};DatabaseBoardFeetBasis='Unverified';DuplicateAffectedTrusses=$dbOnlyDuplicates.AffectedTrusses;DuplicateExtraPieceRows=$dbOnlyDuplicates.ExtraPieceRows;DuplicateNote=$dbOnlyDuplicates.Note;DbTrussCount=[int]$dbProject.TrussCount;LatestDatabaseModified=if($dbProject.ProjectModified -is [DBNull]){$null}else{$dbProject.ProjectModified};Healthy=$false}
+   $dbOnlyVersions=if($dbVersionItems.ContainsKey(([guid]$dbProject.EventKey).ToString())){TrussVersionSummary $dbVersionItems[([guid]$dbProject.EventKey).ToString()] $LegacyCutoffVersion}else{$null}
+   $missingSummary=[pscustomobject][ordered]@{Project=$displayNumber;ProjectEventKey=[string]$dbProject.EventKey;csdproj=$null;CsdprojLastModifiedUtc=$null;Status='No csdproj found';NoCsdproj=$true;DatabaseBoardFeet=if($dbProject.CachedBoardFeet -is [DBNull]){$null}else{[decimal]$dbProject.CachedBoardFeet};DatabaseBoardFeetBasis='Unverified';TrussVersions=$(if($dbOnlyVersions){$dbOnlyVersions.Versions}else{$null});VersionEra=$(if($dbOnlyVersions){$dbOnlyVersions.Era}else{$null});DuplicateAffectedTrusses=$dbOnlyDuplicates.AffectedTrusses;DuplicateExtraPieceRows=$dbOnlyDuplicates.ExtraPieceRows;DuplicateNote=$dbOnlyDuplicates.Note;DbTrussCount=[int]$dbProject.TrussCount;LatestDatabaseModified=if($dbProject.ProjectModified -is [DBNull]){$null}else{$dbProject.ProjectModified};Healthy=$false}
    $missingPage='db-'+([guid]$dbProject.EventKey).ToString('N')+'.html'
    $allSummary.Add($missingSummary);$links.Add([pscustomobject]@{Summary=$missingSummary;Page=$missingPage})
    $missingBody='<p><a href="../index.html">Back to all projects</a></p><p class="notice">No eligible csdproj archive was found under '+(Enc $root)+'. DeletedProjects, directory reparse points and Attachment_/Attachments_ archives are excluded from the scan. This does not establish whether an archive exists elsewhere.</p><div class="scroll">'+(SummaryTable @($missingSummary))+'</div><p>DB project ID: '+(Enc $dbProject.EventKey)+'</p>'
@@ -1039,21 +1119,24 @@ $normalLinks=[Collections.Generic.List[object]]::new()
 $emptyLinks=[Collections.Generic.List[object]]::new()
 $missingDbLinks=[Collections.Generic.List[object]]::new()
 $legacyLinks=[Collections.Generic.List[object]]::new()
+$possiblyLegacyLinks=[Collections.Generic.List[object]]::new()
 $missingArchiveLinks=[Collections.Generic.List[object]]::new()
 foreach($link in $links){
  $isEmpty=$link.Summary.Status -eq 'Compared'
  foreach($col in $numericColumns){if($link.Summary.$col -ne 0){$isEmpty=$false}}
- if($link.Summary.NoCsdproj){$missingArchiveLinks.Add($link)}elseif($link.Summary.LegacyPre2024R7){$legacyLinks.Add($link)}elseif($link.Summary.Status -eq 'Project not in DB'){$missingDbLinks.Add($link)}elseif($isEmpty){$emptyLinks.Add($link)}else{$normalLinks.Add($link)}
+ if($link.Summary.NoCsdproj){$missingArchiveLinks.Add($link)}elseif($link.Summary.LegacyPre2024R7){if($link.Summary.LegacyBasis -eq 'AnalysisVersion'){$legacyLinks.Add($link)}else{$possiblyLegacyLinks.Add($link)}}elseif($link.Summary.Status -eq 'Project not in DB'){$missingDbLinks.Add($link)}elseif($isEmpty){$emptyLinks.Add($link)}else{$normalLinks.Add($link)}
 }
-$columns=if($allSummary.Count){@($allSummary[0].PSObject.Properties.Name)}else{@()}
-$null=$table.Append('<div class="scroll overview-table">'+(SummaryHeader -Overview))
-foreach($section in @('Results','Project not in DB','Possibly Legacy [2024.r7]','Empty','DB projects without csdproj')){
- $sectionLinks=if($section -eq 'Results'){$normalLinks}elseif($section -eq 'Project not in DB'){$missingDbLinks}elseif($section -eq 'Possibly Legacy [2024.r7]'){$legacyLinks}elseif($section -eq 'DB projects without csdproj'){$missingArchiveLinks}else{$emptyLinks}
- $summaryColumnCount=if($Timestamp){28}else{22}
- $null=$table.Append('<tr class="section-divider"><td colspan="'+$summaryColumnCount+'">'+$section+' ('+$sectionLinks.Count+')</td></tr>')
- foreach($link in @($sectionLinks | Sort-Object @{Expression={if($_.Summary.NoCsdproj){$_.Summary.LatestDatabaseModified}else{$_.Summary.CsdprojLastModifiedUtc}};Descending=$true},@{Expression={$_.Summary.Project}},@{Expression={$_.Summary.csdproj}})){$null=$table.Append((SummaryRow $link.Summary ('projects/'+[uri]::EscapeDataString($link.Page)) -Overview))}
-}
-$null=$table.Append('</tbody></table></div>')
+$overviewSections=@(
+ [pscustomobject]@{Id='results';Title='Results';Links=$normalLinks}
+ [pscustomobject]@{Id='not-in-db';Title='Project not in DB';Links=$missingDbLinks}
+ [pscustomobject]@{Id='legacy';Title='Legacy [2024.r7]';Links=$legacyLinks}
+ [pscustomobject]@{Id='possibly-legacy';Title='Possibly Legacy [2024.r7]';Links=$possiblyLegacyLinks}
+ [pscustomobject]@{Id='empty';Title='Empty';Links=$emptyLinks}
+ [pscustomobject]@{Id='db-only';Title='DB projects without csdproj';Links=$missingArchiveLinks}
+)
+$defaultSection=@($overviewSections | Where-Object {@($_.Links).Count} | Select-Object -First 1)
+$defaultTabId=if($defaultSection.Count){$defaultSection[0].Id}else{'results'}
+$null=$table.Append((OverviewTabsHtml $overviewSections $defaultTabId))
 $context='{0} archive projects; {1} csdproj archives; {4} DB projects without csdproj. {2} / {3}.' -f $selectedIds.Count,($allSummary.Count-$missingArchiveLinks.Count),$Server,$Database,$missingArchiveLinks.Count
 $indexLegend=ReportLegend $FileTimeZone $DatabaseTimeZone $ToleranceSeconds $NumericTolerance ([bool]$Timestamp) $context
 Page 'CSDirector: Database and Project file Sync Report' ($indexLegend+$table.ToString()) (Join-Path $out 'index.html') -Overview

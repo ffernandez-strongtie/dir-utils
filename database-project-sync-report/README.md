@@ -95,6 +95,14 @@ The delayed 2024.r7 release changed the source of truth from database values to 
 
 These rows have a yellow status cell in their own **Possibly Legacy [2024.r7]** section, newest first. Comparison values are suppressed in HTML, console output, and summary JSON. Available DB truss counts, stored BDFT, and duplicate-piece counts remain visible in their normal columns; unavailable values use gray `-` cells. The explanation and latest DB modification time remain in the summary. Projects with later or unknown dates and no JSON remain unresolved; the release date does not establish when a customer upgraded. Use `-LegacyCutoffDate yyyy-MM-dd` to change the approximate cutoff when better deployment information is available.
 
+## Truss versions
+
+Every row has a **Truss versions** column listing each distinct `ComponentTruss.AnalysisVersion` found in the project's DB trusses, one per line with the truss count, for example `2023.3.1.0 (4)`. A bold label compares them with `-LegacyCutoffVersion`: **All pre-cutoff**, **Mixed**, **All current**, or **Unknown** (a version is missing or unparseable; shown as `Unknown (N)` or the raw text). Mixed projects are compared normally and get a purple notice in the status cell. DB-only projects get their versions from one grouped query. `summary.json` carries `TrussVersions` (version, count, pre-cutoff flag) and `VersionEra`.
+
+## Index tabs
+
+`index.html` shows each section as a tab with its project count: **Results**, **Project not in DB**, **Legacy [2024.r7]** (decided by truss versions), **Possibly Legacy [2024.r7]** (date guess), **Empty**, and **DB projects without csdproj**. The first non-empty tab opens by default, and the selected tab is kept in the address (`#legacy`), so the browser back button from a project page returns to it.
+
 ## Database projects without archives
 
 After **Empty**, the index lists **DB projects without csdproj**, sorted by DB project modification time descending (unknown dates last). The first column shows the DB project’s last-modified time (database wall time, not creation time). DB truss counts and stored BDFT remain in their normal columns; unavailable values use gray cells with `-`. The suspected-duplicate piece check is skipped by default for DB-only projects, so their duplicate counts show gray `-` with a note that the check was not run; add `-CheckDbOnlyDuplicates` to enable it. Each row links to a project page carrying the same report identity header. These records are also included in `summary.json`.
