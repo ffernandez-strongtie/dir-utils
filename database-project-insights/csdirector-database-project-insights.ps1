@@ -22,7 +22,8 @@ param(
  [string]$OutputDirectory=(Join-Path (Get-Location).Path 'output-insights'),
  [string[]]$ProjectId,
  [ValidatePattern('^\d+(\.\d+){0,3}$')][string]$LegacyCutoffVersion='2024.7.2.7',
- [ValidateRange(0,2147483647)][int]$Limit=0
+ [ValidateRange(0,2147483647)][int]$Limit=0,
+ [switch]$IncludeDbOnly
 )
 $ErrorActionPreference='Stop'
 Write-Host ''
@@ -129,6 +130,60 @@ function DbTrusses($number){
  }
  return ,$d
 }
+function FillFields($row,$j,$r,$h,$F,$stale,$cut){
+ $both=($null -ne $j -and $null -ne $r)
+ $jv=$null;$jc=$null;$dv=$null;$dc=$null
+ if($j){$pv=$j.PSObject.Properties['Version'];if($pv){$jv=$pv.Value};$pv=$j.PSObject.Properties['CompatibilityVersion'];if($pv){$jc=$pv.Value}}
+ if($r){$dv=$r['AnalysisVersion'];$dc=$r['CompatibilityVersion']}
+ $row.version=[ordered]@{file=$jv;db=$dv;compat_file=$jc;compat_db=$dc}
+ $same=$null
+ if($both){
+  $same=([string]$jv -eq [string]$dv)
+  if(-not $same){
+   $fvp=ParseVer $jv;$dvp=ParseVer $dv
+   if($null -ne $dvp -and (VerLess $dvp $cut) -and -not ($null -ne $fvp -and (VerLess $fvp $cut))){
+    AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'DB frozen at before 2024.r7 version; file is current (re-opened in Studio, DB not refreshed)' 'Version' 'warn'
+   }else{
+    AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'File and DB version differ' 'Version'
+   }
+  }
+ }
+ $row.fields.Add([ordered]@{field='Version';group='Version';column='AnalysisVersion';db=$dv;file=$jv;match=$same})
+ $dk=$null;if($r){$dk=$r['TrussFileCheckSum']}
+ $cm=$null
+ if($null -ne $dk -and $h){$cm=(([string]$dk).ToUpperInvariant() -eq $h)}
+ $row.fields.Add([ordered]@{field='TdlTrussMD5';group='Identity';column='TrussFileCheckSum';db=$dk;file=$h;match=$cm})
+ if($both -and $cm -eq $false){AddF $row $F $stale 'R-CKSUM' 'TrussFileCheckSum' ([string]$dk) $h '.tdlTruss MD5 differs from DB checksum' 'Identity'}
+ foreach($fld in $Map.Keys){
+  $col=$Map[$fld]
+  $grp=if($FieldGroup.ContainsKey($fld)){$FieldGroup[$fld]}else{'Geometry'}
+  $a=$null;if($j){$pa=$j.PSObject.Properties[$fld];if($pa){$a=$pa.Value}}
+  $b=$null;if($r){$b=$r[$col]}
+  if($null -eq $a -or $null -eq $b){
+   $row.fields.Add([ordered]@{field=$fld;group=$grp;column=$col;db=$b;file=$a;match=$null});continue
+  }
+  if($a -is [bool] -or $b -is [bool]){$eq=([bool]$a -eq [bool]$b)}
+  else{
+   $x=0.0;$y=0.0
+   if([double]::TryParse(([string]$a),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$x) -and [double]::TryParse(([Convert]::ToString($b,[Globalization.CultureInfo]::InvariantCulture)),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$y)){$eq=([math]::Abs($x-$y) -le 0.001)}
+   else{$eq=([string]$a -eq [string]$b)}
+  }
+  $row.fields.Add([ordered]@{field=$fld;group=$grp;column=$col;db=$b;file=$a;match=$eq})
+  if(-not $eq){AddF $row $F $stale 'R-FLD' $fld $b $a ($col+' differs') $grp}
+ }
+}
+function AnalyzeDbOnly($number,$ci){
+ $out=[ordered]@{project=$number;archive=$null;archiveTs=$null;dbFilesCheckInId=$ci;notInDb=$false;dbOnly=$true;trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
+ $dbt=DbTrusses $number
+ foreach($name in ($dbt.Keys | Sort-Object)){
+  $row=[ordered]@{name=$name;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
+  FillFields $row $null $dbt[$name][0] $null $out.findings $false $null
+  $out.trusses.Add($row)
+ }
+ $out.counts=[ordered]@{trusses=$out.trusses.Count;findings=0;bad=0;stale=0;pre=0}
+ $out.staleProject=$false
+ return ,$out
+}
 function AnalyzeProject($number,$archivePath,$cut){
  $m=[regex]::Match([IO.Path]::GetFileName($archivePath),'_(\d{14})')
  $ts=if($m.Success){$m.Groups[1].Value}else{$null}
@@ -164,66 +219,34 @@ function AnalyzeProject($number,$archivePath,$cut){
    $row=[ordered]@{name=$name;cells=(Cells 'ok');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
    $rows=$null
    if($dbt.ContainsKey($name)){$rows=$dbt[$name]}
-   if(-not $files.ContainsKey($name)){
-    $av=$null
-    if($rows){$av=ParseVer $rows[0]['AnalysisVersion']}
-    if($rows -and $null -ne $av -and (VerLess $av $cut)){
-     $row.cells=Cells 'pre';$row.pre=$true
-     $row.version=[ordered]@{file=$null;db=$rows[0]['AnalysisVersion']}
-     $out.trusses.Add($row);continue
-    }
-    AddF $row $F $stale 'R-FILE' ('Trusses/generated/'+$name+'.json') 'present' 'missing' 'Truss in DB but no file in archive' 'Identity'
-    $row.cells=IdentityOnly $row.cells['Identity']
-    $out.trusses.Add($row);continue
-   }
-   $j=ReadEntryJson $files[$name]
-   if(-not $rows){
-    AddF $row $F $stale 'R-DB' 'ComponentHeader.Name' 'missing' $name 'Truss in file but not in DB' 'Identity'
-    $row.cells=IdentityOnly $row.cells['Identity']
-    $out.trusses.Add($row);continue
-   }
-   if($rows.Count -gt 1){AddF $row $F $stale 'R-DUP' 'ComponentHeader.Name' $rows.Count 1 'Duplicate truss name rows in DB' 'Identity'}
-   $r=$rows[0]
+   $r=$null;if($rows){$r=$rows[0]}
+   $j=$null;$h=$null
+   if($files.ContainsKey($name)){$j=ReadEntryJson $files[$name]}
    if($tdl.ContainsKey($name)){
     $md5=[Security.Cryptography.MD5]::Create()
     try{$h=[BitConverter]::ToString($md5.ComputeHash((ReadEntryBytes $tdl[$name])))}finally{$md5.Dispose()}
-    if($null -ne $r['TrussFileCheckSum'] -and ([string]$r['TrussFileCheckSum']).ToUpperInvariant() -ne $h){
-     AddF $row $F $stale 'R-CKSUM' 'TrussFileCheckSum' ([string]$r['TrussFileCheckSum']) $h '.tdlTruss MD5 differs from DB checksum' 'Identity'
-    }
-   }else{
-    AddF $row $F $stale 'R-TDL' ('Trusses/'+$name+'.tdlTruss') 'n/a' 'missing' 'No .tdlTruss for truss' 'Identity' 'warn'
    }
-   $jv=$j.PSObject.Properties['Version'];$jv=if($jv){$jv.Value}else{$null}
-   $jc=$j.PSObject.Properties['CompatibilityVersion'];$jc=if($jc){$jc.Value}else{$null}
-   $dv=$r['AnalysisVersion']
-   $fvp=ParseVer $jv;$dvp=ParseVer $dv
-   $row.version=[ordered]@{file=$jv;db=$dv;compat_file=$jc;compat_db=$r['CompatibilityVersion']}
-   $same=([string]$jv -eq [string]$dv)
-   if(-not $same){
-    if($null -ne $dvp -and (VerLess $dvp $cut) -and -not ($null -ne $fvp -and (VerLess $fvp $cut))){
-     AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'DB frozen at before 2024.r7 version; file is current (re-opened in Studio, DB not refreshed)' 'Version' 'warn'
+   if($null -eq $j){
+    $av=$null
+    if($r){$av=ParseVer $r['AnalysisVersion']}
+    if($r -and $null -ne $av -and (VerLess $av $cut)){
+     $row.cells=Cells 'pre';$row.pre=$true
     }else{
-     AddF $row $F $stale 'R-VER' 'Version vs AnalysisVersion' $dv $jv 'File and DB version differ' 'Version'
+     AddF $row $F $stale 'R-FILE' ('Trusses/generated/'+$name+'.json') 'present' 'missing' 'Truss in DB but no file in archive' 'Identity'
+     $row.cells=IdentityOnly $row.cells['Identity']
     }
+    FillFields $row $null $r $h $F $stale $cut
+    $out.trusses.Add($row);continue
    }
-   $row.fields.Add([ordered]@{field='Version';group='Version';column='AnalysisVersion';db=$dv;file=$jv;match=$same})
-   foreach($fld in $Map.Keys){
-    $col=$Map[$fld]
-    $grp=if($FieldGroup.ContainsKey($fld)){$FieldGroup[$fld]}else{'Geometry'}
-    $pa=$j.PSObject.Properties[$fld];$a=if($pa){$pa.Value}else{$null}
-    $b=$r[$col]
-    if($null -eq $a -or $null -eq $b){
-     $row.fields.Add([ordered]@{field=$fld;group=$grp;column=$col;db=$b;file=$a;match=$null});continue
-    }
-    if($a -is [bool] -or $b -is [bool]){$eq=([bool]$a -eq [bool]$b)}
-    else{
-     $x=0.0;$y=0.0
-     if([double]::TryParse(([string]$a),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$x) -and [double]::TryParse(([Convert]::ToString($b,[Globalization.CultureInfo]::InvariantCulture)),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$y)){$eq=([math]::Abs($x-$y) -le 0.001)}
-     else{$eq=([string]$a -eq [string]$b)}
-    }
-    $row.fields.Add([ordered]@{field=$fld;group=$grp;column=$col;db=$b;file=$a;match=$eq})
-    if(-not $eq){AddF $row $F $stale 'R-FLD' $fld $b $a ($col+' differs') $grp}
+   if(-not $r){
+    AddF $row $F $stale 'R-DB' 'ComponentHeader.Name' 'missing' $name 'Truss in file but not in DB' 'Identity'
+    $row.cells=IdentityOnly $row.cells['Identity']
+    FillFields $row $j $null $h $F $stale $cut
+    $out.trusses.Add($row);continue
    }
+   if($rows.Count -gt 1){AddF $row $F $stale 'R-DUP' 'ComponentHeader.Name' $rows.Count 1 'Duplicate truss name rows in DB' 'Identity'}
+   if(-not $tdl.ContainsKey($name)){AddF $row $F $stale 'R-TDL' ('Trusses/'+$name+'.tdlTruss') 'n/a' 'missing' 'No .tdlTruss for truss' 'Identity' 'warn'}
+   FillFields $row $j $r $h $F $stale $cut
    $out.trusses.Add($row)
   }
  }finally{$zip.Dispose()}
@@ -241,6 +264,7 @@ function AnalyzeProject($number,$archivePath,$cut){
  return ,$out
 }
 function StateOf($o){
+ if($o.dbOnly){return 'DB only'}
  if($o.notInDb){return 'Not in DB'}
  foreach($f in $o.findings){if($f.sev -eq 'error'){return 'Inconsistent'}}
  if($o.counts.trusses -gt 0 -and $o.counts.pre -eq $o.counts.trusses){return 'Before 2024.r7'}
@@ -252,7 +276,7 @@ function VerdictOf($o,$st){
  switch($st){
   'Consistent'{"All $n trusses match."}
   'Not in DB'{'Archive exists, but the project is not in the DB'}
-  'DB only'{'In the DB, but no archive folder on disk. Not compared.'}
+  'DB only'{'In the DB, but no archive folder on disk. DB values only; nothing to compare.'}
   'Before 2024.r7'{'Frozen before 2024.r7 DB state; no Studio files to compare.'}
   'Stale DB'{"DB older than the archive (re-saved in Studio). $($o.counts.stale) of $n trusses differ."}
   default{"$($o.counts.bad) of $n trusses have real mismatches."}
@@ -288,16 +312,16 @@ $ProjectTemplate=@'
 const G=@@GROUPS@@,D=@@DATA@@,CL={ok:'c-ok',bad:'c-bad',stale:'c-stale',pre:'c-pre',na:'c-na'},SY={ok:'&#10003;',bad:'&#8800;',stale:'&#8635;',pre:'&#9208;',na:'&#8709;'},open_=new Set(),all_=new Set();
 let rules=new Set();
 function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-function fv(x){return x==null?'(null)':esc(x)}
+function fv(x){return x==null?'-':esc(x)}
 function det(i){const r=D[i],F=r[4]||[];let h='<tr><td colspan=6 style="background:#fafbfc">';
 if(r[2].length)h+='<p class=note>'+r[2].map(f=>'<b>'+f[6]+'</b>: '+f[0]+' - '+esc(f[5])+(f[4]=='stale'?' (stale DB)':'')).filter((v,k,a)=>a.indexOf(v)==k).join('<br>')+'</p>';
 const bad=F.filter(f=>f.match===false),rest=F.filter(f=>f.match!==false);
 const row=(f)=>'<tr class="'+(f.match===false?'dd':'')+'"><td>'+f.group+'</td><td>'+esc(f.field)+'</td><td>'+esc(f.column)+'</td><td class="'+(f.match===false?'d':f.match?'f':'')+'">'+fv(f.db)+'</td><td class="'+(f.match===false?'d':f.match?'f':'')+'">'+fv(f.file)+'</td><td>'+(f.match===false?'differs':f.match?'match':'n/a')+'</td></tr>';
 const extra=r[2].filter(f=>f[0]!='Truss value differs'&&f[0]!='Truss version differs');
 const xr=extra.map(f=>'<tr class=dd><td>'+f[6]+'</td><td>'+esc(f[1])+'</td><td>-</td><td class=d>'+fv(f[2])+'</td><td class=d>'+fv(f[3])+'</td><td>'+(f[4]=='stale'?'stale':'differs')+'</td></tr>').join('');
-if(F.length||xr){h+='<table class=sbs><tr><th>Group</th><th>JSON field</th><th>DB column</th><th>DB</th><th>File</th><th></th></tr>'+xr+bad.map(row).join('')+(all_.has(i)?rest.map(row).join(''):'')+'</table>';
-if(rest.length)h+='<a href="#" onclick="all_.has('+i+')?all_.delete('+i+'):all_.add('+i+');draw();return false">'+(all_.has(i)?'hide':'show')+' '+rest.length+' matching/other fields</a>';}
-else h+='<p>No comparable fields (truss present on one side only or before 2024.r7 DB-only).</p>';
+if(F.length||xr){h+='<table class=sbs><tr><th>Group</th><th>JSON field</th><th>DB column</th><th>DB</th><th>File (archive)</th><th></th></tr>'+xr+bad.map(row).join('')+(all_.has(i)||!bad.length?rest.map(row).join(''):'')+'</table>';
+if(rest.length&&bad.length)h+='<a href="#" onclick="all_.has('+i+')?all_.delete('+i+'):all_.add('+i+');draw();return false">'+(all_.has(i)?'hide':'show')+' '+rest.length+' matching/other fields</a>';}
+else h+='<p>No values recorded.</p>';
 return h+'</td></tr>'}
 function draw(){const q=document.getElementById('q').value.toLowerCase(),ob=document.getElementById('onlyBad').checked;let n=0,h='';
 D.forEach((r,i)=>{if(ob&&!r[2].length)return;if(q&&r[0].toLowerCase().indexOf(q)<0)return;if(rules.size&&!r[2].some(f=>rules.has(f[0])))return;n++;if(n>400)return;
@@ -306,6 +330,7 @@ document.getElementById('tb').innerHTML=h;document.getElementById('cnt').textCon
 function tg(i){open_.has(i)?open_.delete(i):open_.add(i);draw()}
 document.getElementById('q').oninput=draw;document.getElementById('onlyBad').onchange=draw;
 document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{const r=c.dataset.r;rules.has(r)?rules.delete(r):rules.add(r);c.classList.toggle('on');draw()});
+if(!D.some(r=>r[2].length))document.getElementById('onlyBad').checked=false;
 draw();
 </script>
 '@
@@ -353,16 +378,7 @@ foreach($d in (Get-ChildItem -LiteralPath $root -Directory | Sort-Object Name)){
 if($Limit -gt 0){$work=@($work | Select-Object -First $Limit)}
 Write-Host ('Projects with archives: '+$work.Count)
 
-$results=[Collections.Generic.List[object]]::new()
-$used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$i=0
-try{
-foreach($w in $work){
- $i++
- Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
- $number=$w[0]
- try{$o=AnalyzeProject $number $w[1] $cut}
- catch{Write-Warning ($number+": "+$_.Exception.Message+" @ "+$_.InvocationInfo.ScriptLineNumber);continue}
+function WriteProject($o,$number){
  $st=StateOf $o
  $o.state=$st
  $folder=SafeName $number;$n=2
@@ -376,7 +392,7 @@ foreach($w in $work){
   if($bySev.Contains($f.sev)){$bySev[$f.sev]++}else{$bySev[$f.sev]=1}
  }
  $o.byRule=$byRule
- $summary=[ordered]@{project=$number;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
+ $summary=[ordered]@{project=$number;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null})});trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
  WriteText (Join-Path $dir 'summary.json') (ToJson $summary 4)
  $flat=[Collections.Generic.List[object]]::new()
  foreach($f in $o.findings){$flat.Add([ordered]@{ruleId=$f.rule;ruleName=$Rules[$f.rule][0];rule=$Rules[$f.rule][1];project=$number;truss=$f.truss;field=$f.field;dbValue=$f.db;fileValue=$f.file;severity=$f.sev})}
@@ -408,21 +424,45 @@ foreach($w in $work){
  }) -join '')
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
- $meta='archive '+(Esc $o.archive)+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'
+ $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'
  $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@META@@',$meta).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
  WriteText (Join-Path $dir 'project.html') $page
- $results.Add($o)
+ [void]$results.Add($o)
  $o.trusses=$null
 }
-if(-not $ProjectId -and $Limit -le 0){
+$results=[Collections.Generic.List[object]]::new()
+$used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$i=0
+try{
+foreach($w in $work){
+ $i++
+ Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
+ $number=$w[0]
+ try{$o=AnalyzeProject $number $w[1] $cut}
+ catch{Write-Warning ($number+": "+$_.Exception.Message+" @ "+$_.InvocationInfo.ScriptLineNumber);continue}
+ WriteProject $o $number
+}
+if($IncludeDbOnly){
  $have=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
- foreach($w in $work){[void]$have.Add($w[0])}
- $dbp=Q 'SELECT p.ProjectNumber,p.FilesCheckInId,(SELECT COUNT(*) FROM dbo.ComponentHeader h WHERE h.ProjectEventKey=p.EventKey) AS Trusses FROM dbo.Project p ORDER BY p.ProjectNumber' @{}
+ foreach($d in (Get-ChildItem -LiteralPath $root -Directory)){[void]$have.Add($d.Name)}
+ $dbp=Q 'SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p ORDER BY p.ProjectNumber' @{}
+ $dbOnly=@()
  foreach($r in $dbp.Rows){
   $pn=[string]$r['ProjectNumber']
   if($have.Contains($pn)){continue}
-  $ci=if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']}
-  $results.Add(@{project=$pn;state='DB only';folder=$null;dbFilesCheckInId=$ci;counts=@{trusses=[int]$r['Trusses'];bad=0;stale=0;pre=0};cats=[ordered]@{}})
+  if($ProjectId -and ($ProjectId -notcontains $pn)){continue}
+  $dbOnly+=,@($pn,$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']}))
+ }
+ if($Limit -gt 0){$dbOnly=@($dbOnly | Select-Object -First $Limit)}
+ Write-Host ('DB-only projects: '+$dbOnly.Count)
+ $k=0
+ foreach($w in $dbOnly){
+  $k++
+  Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
+  try{$o=AnalyzeDbOnly $w[0] $w[1]}
+  catch{Write-Warning ($w[0]+": "+$_.Exception.Message);continue}
+  $o.state='DB only'
+  WriteProject $o $w[0]
  }
 }
 }finally{$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
@@ -430,7 +470,8 @@ if(-not $ProjectId -and $Limit -le 0){
 $order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Before 2024.r7'=4;'DB only'=5}
 $ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
 $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.state]++}
-$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Before 2024.r7','DB only')
+$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Before 2024.r7')
+if($IncludeDbOnly){$tabNames+='DB only'}
 $tabCount=$cnt
 $cards=(($tabNames | ForEach-Object {'<div class=card><b>'+$tabCount[$_]+'</b>'+$_+'</div>'}) -join '')
 $tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'">'+$_+' ('+$tabCount[$_]+')</div>'}) -join '')
@@ -444,7 +485,7 @@ $index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@COUNT@@',[string]$ranke
 WriteText (Join-Path $outDir 'index.html') $index
 Write-Host ''
 Write-Host ('Projects: '+$ranked.Count)
-foreach($s in $order.Keys){Write-Host ('  '+$s+': '+$cnt[$s])}
+foreach($s in $tabNames){Write-Host ('  '+$s+': '+$cnt[$s])}
 $reportUri=([System.Uri]([IO.Path]::GetFullPath((Join-Path $outDir 'index.html')))).AbsoluteUri
 $escape=[char]27
 Write-Host ("Report: ${escape}]8;;${reportUri}${escape}\${reportUri}${escape}]8;;${escape}\")
