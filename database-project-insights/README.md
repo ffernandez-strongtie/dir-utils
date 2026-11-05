@@ -1,4 +1,4 @@
-# CSDirector database vs project file insights
+# CSDirector / TrussStudio Insights
 
 `csdirector-database-project-insights.ps1` compares the trusses stored in the CSDirector database with the TrussStudio files inside each `.csdproj` archive and writes a browsable summary. It is read-only.
 
@@ -19,6 +19,7 @@ Without `-SqlUser` it uses Windows authentication. The password is only read fro
 | `-OutputDirectory` | `.\output-insights` | Timestamp is appended |
 | `-ProjectId` | all | Limit to specific project numbers |
 | `-Limit` | 0 (all) | Stop after N projects |
+| `-Client` | off | Inspect the Client database instead of the Server one. Defaults become `C:\SST\Client\Projects` and `CSDatabaseClient`. A project folder with an expanded `Trusses` folder is read directly; otherwise its `.CSDProj` is used. The report and every project page are labelled CLIENT or SERVER |
 | `-IncludeDbOnly` | off | Also write pages for DB projects with no archive folder (DB values only, "DB only" tab). Omitted by default |
 | `-LegacyCutoffVersion` | `2024.7.2.7` | Truss versions strictly lower are before 2024.r7 (DB was the source of truth) |
 

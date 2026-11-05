@@ -15,10 +15,11 @@ A project whose DB check-in id is older than the archive timestamp is reported a
 #>
 [CmdletBinding()]
 param(
- [string]$ProjectsRoot='C:\SST\Server\Projects',
+ [switch]$Client,
+ [string]$ProjectsRoot=$(if($Client){'C:\SST\Client\Projects'}else{'C:\SST\Server\Projects'}),
  [string]$Server='.\SST',
  [string]$SqlUser,
- [string]$Database='CSDatabaseServer',
+ [string]$Database=$(if($Client){'CSDatabaseClient'}else{'CSDatabaseServer'}),
  [string]$OutputDirectory=(Join-Path (Get-Location).Path 'output-insights'),
  [string[]]$ProjectId,
  [ValidatePattern('^\d+(\.\d+){0,3}$')][string]$LegacyCutoffVersion='2024.7.2.7',
@@ -29,6 +30,7 @@ $ErrorActionPreference='Stop'
 Write-Host ''
 Write-Host 'CSDirector: Database and Project file Insights' -ForegroundColor Cyan
 Write-Host ('Compares DB trusses with TrussStudio files in each .csdproj using '+$(if($SqlUser){'SQL authentication ('+$SqlUser+').'}else{'Windows authentication.'}))
+Write-Host ('Target: '+$(if($Client){'Client'}else{'Server'})+' database and projects.')
 Write-Host 'Archives and database records are read only.'
 Write-Host 'Press Enter to accept each default shown in brackets. Command-line values skip their prompts.'
 Write-Host ''
@@ -102,11 +104,13 @@ function AddF($row,$All,$stale,$rule,$field,$dbv,$filev,$msg,$grp,$sev='error'){
  if($c -ne 'bad' -and ($nv -eq 'bad' -or $c -eq 'ok')){$row.cells[$grp]=$nv}
 }
 function ReadEntryBytes($entry){
+ if($entry -is [IO.FileInfo]){return ,[IO.File]::ReadAllBytes($entry.FullName)}
  $s=$entry.Open();$ms=[IO.MemoryStream]::new()
  try{$s.CopyTo($ms)}finally{$s.Dispose()}
  return ,$ms.ToArray()
 }
 function ReadEntryJson($entry){
+ if($entry -is [IO.FileInfo]){return ([IO.File]::ReadAllText($entry.FullName,[Text.Encoding]::UTF8) | ConvertFrom-Json)}
  $s=$entry.Open();$r=[IO.StreamReader]::new($s,[Text.Encoding]::UTF8,$true)
  try{$t=$r.ReadToEnd()}finally{$r.Dispose()}
  $t | ConvertFrom-Json
@@ -185,7 +189,14 @@ function AnalyzeDbOnly($number,$ci){
  return ,$out
 }
 function AnalyzeProject($number,$archivePath,$cut){
- $m=[regex]::Match([IO.Path]::GetFileName($archivePath),'_(\d{14})')
+ $isDir=Test-Path -LiteralPath $archivePath -PathType Container
+ $tsName=[IO.Path]::GetFileName($archivePath)
+ if($isDir){
+  $tsName=''
+  $zs=@(Get-ChildItem -LiteralPath $archivePath -Filter '*.csdproj' -File | Where-Object {$_.Name -notmatch '^Attachments?_'} | Sort-Object Name)
+  if($zs.Count -gt 0){$tsName=$zs[$zs.Count-1].Name}
+ }
+ $m=[regex]::Match($tsName,'_(\d{14})')
  $ts=if($m.Success){$m.Groups[1].Value}else{$null}
  $pdt=Q 'SELECT ProjectNumber,FilesCheckInId FROM dbo.Project WHERE ProjectNumber=@p' @{p=$number}
  $hasProject=$pdt.Rows.Count -gt 0
@@ -193,7 +204,7 @@ function AnalyzeProject($number,$archivePath,$cut){
  if($hasProject -and $pdt.Rows[0]['FilesCheckInId'] -isnot [DBNull]){$dbCheckIn=[string]$pdt.Rows[0]['FilesCheckInId']}
  $dbt=[Collections.Generic.Dictionary[string,object]]::new()
  if($hasProject){$dbt=DbTrusses $number}
- $out=[ordered]@{project=$number;archive=[IO.Path]::GetFileName($archivePath);archiveTs=$ts;dbFilesCheckInId=$dbCheckIn;notInDb=(-not $hasProject);trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
+ $out=[ordered]@{project=$number;archive=$(if($isDir){[IO.Path]::GetFileName($archivePath)+' (expanded folder)'}else{[IO.Path]::GetFileName($archivePath)});archiveTs=$ts;dbFilesCheckInId=$dbCheckIn;notInDb=(-not $hasProject);trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
  $F=$out.findings
  if(-not $hasProject){
   $F.Add([ordered]@{rule='R-PROJ';truss=$null;field='Project';db=$null;file=$number;sev='error';msg='Project not in DB';group='Project'})
@@ -201,15 +212,23 @@ function AnalyzeProject($number,$archivePath,$cut){
   $F.Add([ordered]@{rule='R-FCI';truss=$null;field='FilesCheckInId';db=$dbCheckIn;file=$ts;sev='warn';msg='DB check-in id differs from archive timestamp';group='Project'})
  }
  $stale=[bool]($hasProject -and $ts -and $null -ne $dbCheckIn -and [string]::CompareOrdinal($dbCheckIn,$ts) -lt 0)
- $zip=[IO.Compression.ZipFile]::OpenRead($archivePath)
+ $zip=$null
+ if(-not $isDir){$zip=[IO.Compression.ZipFile]::OpenRead($archivePath)}
  try{
   $files=[Collections.Generic.Dictionary[string,object]]::new()
   $tdl=[Collections.Generic.Dictionary[string,object]]::new()
-  foreach($e in $zip.Entries){
-   $mm=[regex]::Match($e.FullName,'^Trusses/generated/(.+)\.json$')
-   if($mm.Success){$files[$mm.Groups[1].Value]=$e;continue}
-   $mm=[regex]::Match($e.FullName,'^Trusses/(.+)\.tdlTruss$')
-   if($mm.Success){$tdl[$mm.Groups[1].Value]=$e}
+  if($isDir){
+   $gen=Join-Path $archivePath 'Trusses\generated'
+   if(Test-Path -LiteralPath $gen -PathType Container){foreach($e in (Get-ChildItem -LiteralPath $gen -Filter '*.json' -File)){$files[$e.BaseName]=$e}}
+   $tdir=Join-Path $archivePath 'Trusses'
+   if(Test-Path -LiteralPath $tdir -PathType Container){foreach($e in (Get-ChildItem -LiteralPath $tdir -Filter '*.tdlTruss' -File)){$tdl[$e.BaseName]=$e}}
+  }else{
+   foreach($e in $zip.Entries){
+    $mm=[regex]::Match($e.FullName,'^Trusses/generated/(.+)\.json$')
+    if($mm.Success){$files[$mm.Groups[1].Value]=$e;continue}
+    $mm=[regex]::Match($e.FullName,'^Trusses/(.+)\.tdlTruss$')
+    if($mm.Success){$tdl[$mm.Groups[1].Value]=$e}
+   }
   }
   $names=[Collections.Generic.List[string]]::new()
   foreach($k in $files.Keys){$names.Add($k)}
@@ -249,7 +268,7 @@ function AnalyzeProject($number,$archivePath,$cut){
    FillFields $row $j $r $h $F $stale $cut
    $out.trusses.Add($row)
   }
- }finally{$zip.Dispose()}
+ }finally{if($zip){$zip.Dispose()}}
  $bad=0;$st=0;$pre=0
  foreach($t in $out.trusses){
   if($t.pre){$pre++}
@@ -290,7 +309,7 @@ main{padding:16px 24px}a{color:#0b5cad}
 .badge{display:inline-block;padding:2px 9px;border-radius:11px;font-size:12px;font-weight:600;margin-right:4px;white-space:nowrap}
 .b-ok{background:#d6f1de;color:#0d5c28}.b-bad{background:#fbd9d6;color:#9b1c12}.b-pre{background:#e3e6ea;color:#4a5560}.b-warn{background:#fdebc8;color:#7a4b00}
 .cards{display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap}.card{background:#fff;border-radius:6px;padding:10px 16px;box-shadow:0 1px 2px #0002;min-width:120px}.card b{font-size:22px;display:block}
-.tabs{display:flex;gap:2px;border-bottom:2px solid #c9d2db;margin-bottom:10px}.tab{padding:7px 14px;cursor:pointer;background:#e4e9ee;border-radius:6px 6px 0 0}.tab.on{background:#fff;font-weight:600;border:1px solid #c9d2db;border-bottom:2px solid #fff;margin-bottom:-2px}
+.tabs{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap}.tab{cursor:pointer;background:#fff;border-radius:6px;padding:10px 16px;min-width:150px;box-shadow:0 1px 2px #0002;border:2px solid transparent}.tab:hover{border-color:#c9d2db}.tab.on{border-color:#2f6fab}.tab b{font-size:24px;display:block}.tab span{font-size:12px;color:#5a6672}
 input[type=text]{padding:6px 9px;border:1px solid #b8c2cc;border-radius:4px;width:260px}
 table{border-collapse:collapse;background:#fff;width:100%;box-shadow:0 1px 2px #0002}th,td{padding:6px 10px;border-bottom:1px solid #e3e8ed;text-align:left;vertical-align:top}th{background:#eef1f4;position:sticky;top:0}
 .chip{display:inline-block;background:#eef1f4;border-radius:4px;padding:1px 6px;margin:1px;font-size:12px;cursor:pointer;border:1px solid transparent}.chip.on{border-color:#0b5cad;background:#dcebfa}
@@ -302,7 +321,7 @@ table{border-collapse:collapse;background:#fff;width:100%;box-shadow:0 1px 2px #
 
 $ProjectTemplate=@'
 <!doctype html><meta charset=utf-8><title>@@TITLE@@</title><style>@@CSS@@</style>
-<header><h1><a href="../../index.html" style="color:#9cd0ff">All projects</a> / @@TITLE@@ <span class="badge @@BADGE@@">@@STATE@@</span></h1>
+<header><h1><a href="../../index.html" style="color:#9cd0ff">All projects</a> / @@TITLE@@ <span class="badge @@BADGE@@">@@STATE@@</span><span class="badge b-pre" style="float:right">@@MODE@@</span></h1>
 <small>@@META@@</small></header>
 <main><div class="legend"><span><i class="sw c-ok"></i>matches</span><span><i class="sw c-bad"></i>real mismatch</span><span><i class="sw c-stale"></i>stale DB (file newer)</span><span><i class="sw c-pre"></i>before 2024.r7 DB-only (expected)</span><span><i class="sw c-na"></i>not comparable</span></div>
 <p>Filter by issue: @@CHIPS@@</p>
@@ -336,10 +355,9 @@ draw();
 '@
 
 $IndexTemplate=@'
-<!doctype html><meta charset=utf-8><title>CSDirector DB vs csdproj insights</title><style>@@CSS@@</style>
-<header><h1>CSDirector DB vs .csdproj insights <span class="badge b-warn">@@COUNT@@ projects</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. Before 2024.r7 DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@.</small></header>
-<main><div class="cards">@@CARDS@@</div>
-<div class="tabs">@@TABS@@</div>
+<!doctype html><meta charset=utf-8><title>CSDirector / TrussStudio Insights</title><style>@@CSS@@</style>
+<header><h1>CSDirector / TrussStudio Insights <span class="badge b-warn">@@COUNT@@ projects</span><span class="badge b-pre" style="float:right">@@MODE@@</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. Before 2024.r7 DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@.</small></header>
+<main><div class="tabs">@@TABS@@</div>
 <p><input type=text id=q placeholder="filter project number"> Issue: @@CHIPS@@</p>
 <table><thead><tr><th>Project</th><th>State</th><th>Verdict</th><th>Top causes</th><th>Trusses</th></tr></thead><tbody id=tb>@@ROWS@@</tbody></table>
 </main>
@@ -349,6 +367,7 @@ document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;docume
 
 if($Server -ieq 'SST'){$Server='.\SST'}
 $cut=ParseVer $LegacyCutoffVersion
+$modeLabel=$(if($Client){'CLIENT'}else{'SERVER'})+' | '+$Database
 $root=(Get-Item -LiteralPath $ProjectsRoot).FullName.TrimEnd('\')
 $stamp=(Get-Date).ToString('yyyyMMdd-HHmmss')
 $outDir=$OutputDirectory.TrimEnd('\')+'-'+$stamp
@@ -371,6 +390,7 @@ $work=@()
 foreach($d in (Get-ChildItem -LiteralPath $root -Directory | Sort-Object Name)){
  if($d.Name -ieq 'DeletedProjects'){continue}
  if($ProjectId -and ($ProjectId -notcontains $d.Name)){continue}
+ if($Client -and (Test-Path -LiteralPath (Join-Path $d.FullName 'Trusses') -PathType Container)){$work+=,@($d.Name,$d.FullName);continue}
  $arc=@(Get-ChildItem -LiteralPath $d.FullName -Filter '*.csdproj' -File | Where-Object {$_.Name -notmatch '^Attachments?_'} | Sort-Object Name)
  if($arc.Count -eq 0){continue}
  $work+=,@($d.Name,$arc[$arc.Count-1].FullName)
@@ -392,7 +412,7 @@ function WriteProject($o,$number){
   if($bySev.Contains($f.sev)){$bySev[$f.sev]++}else{$bySev[$f.sev]=1}
  }
  $o.byRule=$byRule
- $summary=[ordered]@{project=$number;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null})});trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
+ $summary=[ordered]@{project=$number;mode=$(if($Client){'Client'}else{'Server'});database=$Database;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null})});trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
  WriteText (Join-Path $dir 'summary.json') (ToJson $summary 4)
  $flat=[Collections.Generic.List[object]]::new()
  foreach($f in $o.findings){$flat.Add([ordered]@{ruleId=$f.rule;ruleName=$Rules[$f.rule][0];rule=$Rules[$f.rule][1];project=$number;truss=$f.truss;field=$f.field;dbValue=$f.db;fileValue=$f.file;severity=$f.sev})}
@@ -425,7 +445,7 @@ function WriteProject($o,$number){
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
  $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'
- $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@META@@',$meta).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
+ $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
  WriteText (Join-Path $dir 'project.html') $page
  [void]$results.Add($o)
  $o.trusses=$null
@@ -473,15 +493,15 @@ $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.s
 $tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Before 2024.r7')
 if($IncludeDbOnly){$tabNames+='DB only'}
 $tabCount=$cnt
-$cards=(($tabNames | ForEach-Object {'<div class=card><b>'+$tabCount[$_]+'</b>'+$_+'</div>'}) -join '')
-$tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'">'+$_+' ('+$tabCount[$_]+')</div>'}) -join '')
+$tabHints=@{'Inconsistent'='Files and database disagree';'Stale DB'='Database older than archive';'Not in DB'='Archive has no project row';'Consistent'='Everything matches';'Before 2024.r7'='Database is the source';'DB only'='No archive folder'}
+$tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'"><b>'+$tabCount[$_]+'</b>'+$_+'<br><span>'+$tabHints[$_]+'</span></div>'}) -join '')
 $allChips=(($Rules.Values | ForEach-Object {'<span class="chip" data-c="'+(Esc $_[0])+'" title="'+(Esc $_[1])+'">'+(Esc $_[0])+'</span>'}) -join '')
 $sb=[Text.StringBuilder]::new()
 foreach($o in $ranked){
  $top=(($o.cats.GetEnumerator() | Sort-Object @{Expression={-$_.Value}},@{Expression={$_.Key}} | Select-Object -First 2 | ForEach-Object {'<span class="badge b-pre">'+(Esc $_.Key)+' '+$_.Value+'</span>'}) -join '')
  [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
 }
-$index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@CARDS@@',$cards).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString())
+$index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString())
 WriteText (Join-Path $outDir 'index.html') $index
 Write-Host ''
 Write-Host ('Projects: '+$ranked.Count)
