@@ -27,9 +27,10 @@ The latest archive per project folder is used. Projects with no archive are not 
 
 ## Output
 
-- `index.html`: one row per project with state, verdict, top causes and truss count; tabs and issue filters.
-- `projects/<number>/project.html`: one row per truss with a symbol matrix; click a row for the field-by-field table.
-- `projects/<number>/summary.json`, `findings.json`, `trusses/<truss>.json`: machine-readable detail.
+- `index.html`: one row per project with state, verdict, top causes and truss count; tabs and issue filters; aggregate coverage totals and a link to the contract manifest.
+- `projects/<number>/project.html`: one row per truss with a symbol matrix; click a row for the field-by-field table, per-truss coverage (compared / different / not compared), and the unmapped field inventory.
+- `projects/<number>/summary.json`, `findings.json`, `trusses/<truss>.json`: machine-readable detail. `trusses/<truss>.json` also carries the per-truss coverage counts, the unmapped field inventory and the explicit comparison status of every mapped field (each with its comparison policy and basis; candidate rows are never flagged).
+- `contract.json`: a manifest generated from the same map metadata as the comparison — every mapped pair with group, comparison policy and evidence basis, plus candidates, pending nested/structured encodings and pending lookup identities.
 - `rules.json`: rule id to plain name and description.
 
 ## States
@@ -38,10 +39,89 @@ The latest archive per project folder is used. Projects with no archive are not 
 - **Inconsistent**: at least one real mismatch (value, version, checksum, or truss missing on one side) while the DB is current.
 - **Stale DB**: differences exist, but the DB check-in id is older than the archive timestamp (re-saved in Studio since).
 - **Before 2024.r7**: every truss is DB-only at a version below the cutoff; nothing to compare.
-- **Consistent**: no findings.
+- **Consistent**: no differences in compared values; see coverage for values not compared.
 
 Symbols in the matrix: ✓ match, ≠ mismatch, ↻ stale DB, ⏸ before 2024.r7 DB-only, ∅ not comparable.
 
 ## Checks
 
-Truss name sets (JSON in `Trusses/generated` vs `ComponentHeader`), `.tdlTruss` MD5 vs `ComponentHeader.TrussFileCheckSum`, JSON `Version` vs `ComponentTruss.AnalysisVersion`, and mapped quantity, ply, thickness, height, overhang, cantilever, heel, pitch, flag and spacing fields (numeric tolerance 0.001).
+Truss name sets (JSON in `Trusses/generated` vs `ComponentHeader`), `.tdlTruss` MD5 vs `ComponentHeader.TrussFileCheckSum`, JSON `Version` vs `ComponentTruss.AnalysisVersion`, and all mapped pairs in the contract table below. Every mapped row in the per-truss detail has an explicit status: `match`, `differ`, `unresolved` (candidate mapping not confirmed), `file-only / not compared`, `DB-only / not compared`, `missing field / not compared`, `missing DB column / not compared`, `file NULL / not compared`, `DB NULL / not compared`, `missing side / not compared` or `both null / not compared`. Missing values are never matches; a both-null pair (both sides present, both NULL) is unknown, not equal and distinct from both sides being absent.
+
+Coverage counts per truss and the project aggregate (`compared`, `different`, `notCompared`) say how many mapped values were actually compared; values that were not compared are not claims of equality. Unconsumed top-level JSON properties and unconsumed DB columns are listed per truss in the inventory with status `unresolved`, `file-only / not compared` or `DB-only / not compared`; same-name unknowns are marked unresolved, never compared, and nested JSON objects/arrays (for example `CarriedTrusses`, `JigData`) are retained there pending a structured relational mapping, never raw-text-compared. FK columns are never compared to human names.
+
+## Contract
+
+This is a coverage expansion, not a complete cross-table mapping. The full contract also involves DB tables beyond `Project`, `ComponentHeader`, `Component` and `ComponentTruss`, which are not queried yet.
+
+### Comparison policies
+
+| Policy | Rule |
+|---|---|
+| `numeric` | absolute difference <= 0.001, applied only when both sides parse as numbers; otherwise ordinal case-sensitive text |
+| `integer` | exact integer equality for quantity/ply/count values; ordinal text fallback |
+| `boolean` | compared as bool or numeric 0/1 only; NULL is never coerced to false |
+| `text` | ordinal case-sensitive exact string equality |
+| Units and nulls | `*Inches` geometry values are in inches; pitch values are rise per 12; missing values are never matches — a missing field, an absent DB column, a database NULL, a file NULL and a missing side are distinguished; a both-null pair (both present, both NULL) is unknown, not true, and distinct from both sides being absent |
+
+### Mapped pairs
+
+Basis `observed I-4028` means the pair matches a saved I-4028 file and DB evidence; the mapping is observed, not derived from authoritative producer code. Basis `candidate` is unresolved: names/meaning are not confirmed, both side values are retained and the pair is never flagged as a mismatch. Additional flags not in the map are same-name candidates at runtime only if found, and are never auto-confirmed from the same name.
+
+| JSON field | DB column | Group | Policy | Basis |
+|---|---|---|---|---|
+| Quantity | ComponentQuantity | Identity | integer | observed I-4028 |
+| NumPlies | TrussPlyCount | Geometry | integer | observed I-4028 |
+| Thickness | TrussThicknessInches | Geometry | numeric | observed I-4028 |
+| OverallTrussHeight | OverallTrussHeightInches | Geometry | numeric | observed I-4028 |
+| LeftOverhang | LeftOverhangInches | Geometry | numeric | observed I-4028 |
+| RightOverhang | RightOverhangInches | Geometry | numeric | observed I-4028 |
+| LeftCantilever | LeftCantileverInches | Geometry | numeric | observed I-4028 |
+| RightCantilever | RightCantileverInches | Geometry | numeric | observed I-4028 |
+| LeftHeelHeight | LeftHeelHeightInches | Geometry | numeric | observed I-4028 |
+| RightHeelHeight | RightHeelHeightInches | Geometry | numeric | observed I-4028 |
+| PitchLeftTopOver12 | LeftTopPitchOver12 | Pitch | numeric | observed I-4028 |
+| PitchRightTopOver12 | RightTopPitchOver12 | Pitch | numeric | observed I-4028 |
+| PitchLeftBottomOver12 | LeftBottomPitchOver12 | Pitch | numeric | observed I-4028 |
+| PitchRightBottomOver12 | RightBottomPitchOver12 | Pitch | numeric | observed I-4028 |
+| IsAttic | IsAttic | Flags | boolean | observed I-4028 |
+| IsGable | IsGable | Flags | boolean | observed I-4028 |
+| IsGirder | IsGirder | Flags | boolean | observed I-4028 |
+| IsFlipped | IsFlipped | Flags | boolean | observed I-4028 |
+| OCSpacing | OCSpacing | Geometry | numeric | observed I-4028 |
+| Height | TrussHeightInches | Geometry | numeric | observed I-4028 |
+| LeftHeelToPeak | LeftHeelToPeakInches | Geometry | numeric | observed I-4028 |
+| RightHeelToPeak | RightHeelToPeakInches | Geometry | numeric | observed I-4028 |
+| LeftTopChordHeelToPeak | LeftTopChordHeelToPeakInches | Geometry | numeric | observed I-4028 |
+| RightTopChordHeelToPeak | RightTopChordHeelToPeakInches | Geometry | numeric | observed I-4028 |
+| LeftStub | LeftStubInches | Geometry | numeric | observed I-4028 |
+| RightStub | RightStubInches | Geometry | numeric | observed I-4028 |
+| TCPitchCount | TopChordPitchCount | Pitch | integer | observed I-4028 |
+| BCPitchCount | BottomChordPitchCount | Pitch | integer | observed I-4028 |
+| Camber | Camber | Geometry | numeric | observed I-4028 |
+| CamberDistance | CamberDistanceInches | Geometry | numeric | observed I-4028 |
+| CamberNote | CamberNote | Geometry | text | observed I-4028 |
+| BearingPadNotes | BearingPadNotes | Geometry | text | observed I-4028 |
+| LeftOverhangRake | LeftOverhangRake | Geometry | numeric | observed I-4028 |
+| RightOverhangRake | RightOverhangRake | Geometry | numeric | observed I-4028 |
+| SinglePlyOverhang | SinglePlyOverhang | Flags | boolean | observed I-4028 |
+| SinglePlyFill | SinglePlyFill | Flags | boolean | observed I-4028 |
+| FillPly | FillPly | Geometry | integer | observed I-4028 |
+| OverhangPly | OverhangPly | Geometry | integer | observed I-4028 |
+| TCRakeFirst | TCRakeFirst | Geometry | numeric | observed I-4028 |
+| TCRakeLast | TCRakeLast | Geometry | numeric | observed I-4028 |
+| CompatibilityVersion | CompatibilityVersion | Version | text | observed I-4028 |
+| TrussMatchCode | TrussMatchCode | Geometry | text | observed I-4028 |
+| Span | TrussSpanInches | Geometry | numeric | candidate |
+| ProdSpan | FullSpanInches | Geometry | numeric | candidate |
+| IsStructural | IsStructuralGable | Flags | boolean | candidate |
+| Weight | WeightPounds | Geometry | numeric | candidate |
+| PlyToPlyNote | PlyToPly | Geometry | text | candidate |
+
+Identity and integrity checks that are not rows of the map: truss name sets (sets are compared, pairings are not), `.tdlTruss` MD5 vs `TrussFileCheckSum`, JSON `Version` vs `AnalysisVersion`. `Project.FilesCheckInId` vs the archive timestamp is compared only on Server mode; on Client mode it is informational-only within the contract.
+
+### Pending
+
+- `CarriedTrusses` and `JigData` — same-name structured encodings, pending: retained in the inventory, never string-compared.
+- Nested JSON objects/arrays — retained in the inventory, pending relational mapping.
+- FK columns (`*Key`) — never compared to human names; lookup table identities pending.
+- Full cross-table mapping — not claimed; the contract currently covers the queried tables only.
