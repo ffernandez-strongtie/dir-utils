@@ -208,10 +208,10 @@ function AnalyzeProject($number,$archivePath,$cut){
  $F=$out.findings
  if(-not $hasProject){
   $F.Add([ordered]@{rule='R-PROJ';truss=$null;field='Project';db=$null;file=$number;sev='error';msg='Project not in DB';group='Project'})
- }elseif($ts -and $dbCheckIn -ne $ts){
+ }elseif(-not $Client -and $ts -and $dbCheckIn -ne $ts){
   $F.Add([ordered]@{rule='R-FCI';truss=$null;field='FilesCheckInId';db=$dbCheckIn;file=$ts;sev='warn';msg='DB check-in id differs from archive timestamp';group='Project'})
  }
- $stale=[bool]($hasProject -and $ts -and $null -ne $dbCheckIn -and [string]::CompareOrdinal($dbCheckIn,$ts) -lt 0)
+ $stale=[bool](-not $Client -and $hasProject -and $ts -and $null -ne $dbCheckIn -and [string]::CompareOrdinal($dbCheckIn,$ts) -lt 0)
  $zip=$null
  if(-not $isDir){$zip=[IO.Compression.ZipFile]::OpenRead($archivePath)}
  try{
