@@ -29,9 +29,9 @@ The latest archive per project folder is used. Projects with no archive are not 
 ## Output
 
 - `index.html`: one row per project with state, verdict, top causes and truss count; tabs and issue filters; aggregate coverage totals and a link to the contract manifest.
-- `projects/<number>/project.html`: one row per truss with a symbol matrix; click a row for the field-by-field table, per-truss coverage (compared / different / not compared), and the unmapped field inventory.
+- `projects/<number>/project.html`: one row per truss with a symbol matrix; click a row for the field-by-field table, per-truss coverage (compared / different / not compared).
 - `projects/<number>/summary.json`, `findings.json`: always included machine-readable project detail.
-- `projects/<number>/trusses/<truss>.json`: optional, written only with `-IncludeTrussJson`; carries the per-truss coverage counts, the unmapped field inventory and the explicit comparison status of every mapped field (each with its comparison policy and basis; candidate rows are never flagged).
+- `projects/<number>/trusses/<truss>.json`: optional, written only with `-IncludeTrussJson`; carries the per-truss coverage counts and the explicit comparison status of every mapped field (each with its comparison policy and basis; candidate rows are never flagged).
 - `contract.json`: a manifest generated from the same map metadata as the comparison — every mapped pair with group, comparison policy and evidence basis, plus candidates, pending nested/structured encodings and pending lookup identities.
 - `rules.json`: rule id to plain name and description.
 
@@ -51,7 +51,9 @@ Rows retain the compact report layout; check-in explanations are in the bottom l
 
 Truss membership is the union of `Trusses/<name>.tdlTruss` in the archive and `ComponentHeader.Name` in the DB; JSON in `Trusses/generated` never defines membership, and a JSON file with no matching `.tdlTruss` is ignored. `.tdlTruss` MD5 vs `ComponentHeader.TrussFileCheckSum` is compared whenever a DB row and the `.tdlTruss` both exist, independent of JSON. JSON `Version` vs `ComponentTruss.AnalysisVersion`, and all mapped pairs in the contract table below, are compared only when the JSON exists; a missing JSON leaves those values not compared and is never itself a finding. Every mapped row in the per-truss detail has an explicit status: `match`, `differ`, `unresolved` (candidate mapping not confirmed), `file-only / not compared`, `DB-only / not compared`, `missing field / not compared`, `missing DB column / not compared`, `file NULL / not compared`, `DB NULL / not compared`, `missing side / not compared` or `both null / not compared`. Missing values are never matches; a both-null pair (both sides present, both NULL) is unknown, not equal and distinct from both sides being absent.
 
-Coverage counts per truss and the project aggregate (`compared`, `different`, `notCompared`) say how many mapped values were actually compared; values that were not compared are not claims of equality. Unconsumed top-level JSON properties and unconsumed DB columns are listed per truss in the inventory with status `unresolved`, `file-only / not compared` or `DB-only / not compared`; same-name unknowns are marked unresolved, never compared, and nested JSON objects/arrays (for example `CarriedTrusses`, `JigData`) are retained there pending a structured relational mapping, never raw-text-compared. FK columns are never compared to human names.
+Coverage counts per truss and the project aggregate (`compared`, `different`, `notCompared`) cover mapped fields, version and checksum only; values that were not compared are not claims of equality. Unmapped field inventories are no longer built or included in HTML or JSON, so `notCompared` totals exclude those former inventory entries. Nested/structured mappings and FK lookup identities remain pending in `contract.json`; FK columns are never compared to human names.
+
+Database reads use batches of up to 50 selected projects, with one check-in query and one truss query per batch. The previous batch cache is replaced, rather than loading all projects' trusses at once. Queries select only identity, checksum, version and mapped columns (including unresolved candidates); unused large columns such as `JigData` and `CarriedTrusses` are not fetched. `-ProjectId` and `-Limit` are applied before truss batches are loaded, including the DB-only path. No timing instrumentation is added.
 
 ## Contract
 
@@ -69,7 +71,7 @@ This is a coverage expansion, not a complete cross-table mapping. The full contr
 
 ### Mapped pairs
 
-Basis `observed I-4028` means the pair matches a saved I-4028 file and DB evidence; the mapping is observed, not derived from authoritative producer code. Basis `candidate` is unresolved: names/meaning are not confirmed, both side values are retained and the pair is never flagged as a mismatch. Additional flags not in the map are same-name candidates at runtime only if found, and are never auto-confirmed from the same name.
+Basis `observed I-4028` means the pair matches a saved I-4028 file and DB evidence; the mapping is observed, not derived from authoritative producer code. Basis `candidate` is unresolved: names/meaning are not confirmed, both side values are retained and the pair is never flagged as a mismatch. Additional flags not in the map are not fetched or included in output, and are never auto-confirmed from the same name.
 
 | JSON field | DB column | Group | Policy | Basis |
 |---|---|---|---|---|
@@ -125,7 +127,7 @@ Identity and integrity checks that are not rows of the map: truss membership fro
 
 ### Pending
 
-- `CarriedTrusses` and `JigData` — same-name structured encodings, pending: retained in the inventory, never string-compared.
-- Nested JSON objects/arrays — retained in the inventory, pending relational mapping.
+- `CarriedTrusses` and `JigData` — structured mappings pending; DB payloads are not fetched, never string-compared.
+- Unmapped nested JSON objects/arrays — not included in output; relational mapping pending.
 - FK columns (`*Key`) — never compared to human names; lookup table identities pending.
 - Full cross-table mapping — not claimed; the contract currently covers the queried tables only.

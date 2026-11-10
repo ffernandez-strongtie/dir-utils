@@ -218,52 +218,14 @@ function FieldStatus($f,$d,$candidate){
  if($d.exists){return 'missing field / not compared'}
  'missing DB column / not compared'
 }
-function CoverageOf($fields,$inv){
+function CoverageOf($fields){
  $c=[ordered]@{compared=0;different=0;notCompared=0}
  foreach($f in $fields){
   if($f.status -eq 'match'){$c.compared++}
   elseif($f.status -eq 'differ'){$c.compared++;$c.different++}
   else{$c.notCompared++}
  }
- if($inv){$c.notCompared+=$inv.Count}
  $c
-}
-function BuildInventory($j,$r){
- $inv=[Collections.Generic.List[object]]::new()
- $cFile=[string[]]@('Version','CompatibilityVersion')
- $cDb=[string[]]@('Name','TrussFileCheckSum','AnalysisVersion','CompatibilityVersion')
- $paired=[Collections.Generic.List[string]]::new()
- foreach($k in $Map.Keys){$cFile+=$k;$cDb+=$Map[$k]}
- if($null -ne $j){
-  $nl=[Collections.Generic.List[string]]::new()
-  foreach($p in $j.PSObject.Properties){$nl.Add($p.Name)}
-  $nl.Sort([StringComparer]::Ordinal)
-  foreach($pn in $nl){
-   if($cFile -contains $pn){continue}
-   $pi=SideInfo $j $pn
-   $same=($null -ne $r -and $r.Contains($pn))
-   $nested=($pi.value -is [System.Management.Automation.PSCustomObject] -or $pi.value -is [array])
-   $e=[ordered]@{field=$pn;column=$(if($same){$pn}else{$null});group='Geometry';db=$(if($same){$r[$pn]}else{$null});file=$pi.value;match=$null;status=$(if($same){'unresolved'}else{'file-only / not compared'});note=$null}
-   $notes=[Collections.Generic.List[string]]::new()
-   if($same){$notes.Add('same-name candidate; mapping not confirmed');$paired.Add($pn)}
-   if($pn -eq 'CarriedTrusses' -or $pn -eq 'JigData'){$notes.Add('structured encoding pending; not string-compared')}
-   elseif($nested){$notes.Add('nested '+$(if($pi.value -is [array]){'array'}else{'object'})+'; structured relational mapping pending; not raw-text-compared')}
-   $e.note=if($notes.Count){$notes -join '; '}else{$null}
-   $inv.Add($e)
-  }
- }
- if($null -ne $r){
-  $cl=[Collections.Generic.List[string]]::new()
-  foreach($cn in $r.Keys){$cl.Add($cn)}
-  $cl.Sort([StringComparer]::Ordinal)
-  foreach($cn in $cl){
-   if($cDb -contains $cn -or $paired.Contains($cn)){continue}
-   $fk=($cn -match 'Key$')
-   $e=[ordered]@{field=$null;column=$cn;group='Geometry';db=$r[$cn];file=$null;match=$null;status=$(if($fk){'unresolved'}else{'DB-only / not compared'});note=$(if($fk){'FK identity; lookup table mapping pending; never compared to human names'}else{$null})}
-   $inv.Add($e)
-  }
- }
- return ,$inv
 }
 function ReadEntryBytes($entry){
  if($entry -is [IO.FileInfo]){return ,[IO.File]::ReadAllBytes($entry.FullName)}
@@ -277,12 +239,27 @@ function ReadEntryJson($entry){
  try{$t=$r.ReadToEnd()}finally{$r.Dispose()}
  $t | ConvertFrom-Json
 }
-function DbTrusses($number){
- $dt=Q 'SELECT h.Name,h.TrussFileCheckSum,c.ComponentQuantity,t.* FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber=@p ORDER BY h.Name' @{p=$number}
- $d=[Collections.Generic.Dictionary[string,object]]::new()
+function LoadDbBatch([string[]]$numbers){
+ if($numbers.Count -gt 50){throw 'DB batch exceeds 50 projects.'}
+ $script:ProjectBatch=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+ $script:TrussBatch=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+ if(-not $numbers.Count){return}
+ $params=@{};$placeholders=for($i=0;$i -lt $numbers.Count;$i++){$params['p'+$i]=$numbers[$i];'@p'+$i}
+ $filter=$placeholders -join ','
+ $projects=Q ('SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p WHERE p.ProjectNumber IN ('+$filter+')') $params
+ foreach($r in $projects.Rows){
+  $number=[string]$r['ProjectNumber']
+  $script:ProjectBatch[$number]=$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']})
+ }
+ $columns=@('AnalysisVersion','CompatibilityVersion')+@($Map.Values | Where-Object {$_ -ne 'ComponentQuantity'})
+ $select=(@($columns | Sort-Object -Unique | ForEach-Object {'t.['+$_.Replace(']',']]')+']'}) -join ',')
+ $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,c.ComponentQuantity,'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params
  foreach($r in $dt.Rows){
-  $o=@{}
+  $number=[string]$r['ProjectNumber']
+  if(-not $script:TrussBatch.ContainsKey($number)){$script:TrussBatch[$number]=[Collections.Generic.Dictionary[string,object]]::new()}
+  $d=$script:TrussBatch[$number];$o=@{}
   foreach($col in $dt.Columns){
+   if($col.ColumnName -eq 'ProjectNumber'){continue}
    $v=$r[$col.ColumnName]
    if($v -is [DBNull]){$o[$col.ColumnName]=$null}
    elseif($v -is [byte[]]){if($col.ColumnName -eq 'TrussFileCheckSum'){$o[$col.ColumnName]=[BitConverter]::ToString($v)}}
@@ -293,7 +270,10 @@ function DbTrusses($number){
   if(-not $d.ContainsKey($n)){$d[$n]=[Collections.Generic.List[object]]::new()}
   $d[$n].Add($o)
  }
- return ,$d
+}
+function DbTrusses($number){
+ if($script:TrussBatch.ContainsKey($number)){return ,$script:TrussBatch[$number]}
+ return ,([Collections.Generic.Dictionary[string,object]]::new())
 }
 function FillFields($row,$j,$r,$h,$F,$stale,$cut){
  $jv=$null;$jc=$null;$dv=$null;$dc=$null
@@ -344,8 +324,7 @@ function FillFields($row,$j,$r,$h,$F,$stale,$cut){
   }
   $row.fields.Add([ordered]@{field=$fld;group=$grp;column=$col;db=$b.value;file=$a.value;match=$eq;status=$st;basis=$meta.basis;policy=$meta.policy})
  }
- $row.inventory=BuildInventory $j $r
- $row.coverage=CoverageOf $row.fields $row.inventory
+ $row.coverage=CoverageOf $row.fields
 }
 function AnalyzeDbOnly($number,$ci){
  $out=[ordered]@{project=$number;archive=$null;archiveTs=$null;dbFilesCheckInId=$ci;notInDb=$false;dbOnly=$true;trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
@@ -369,10 +348,9 @@ function AnalyzeProject($number,$archivePath,$cut){
  }
  $m=[regex]::Match($tsName,'_(\d{14})')
  $ts=if($m.Success){$m.Groups[1].Value}else{$null}
- $pdt=Q 'SELECT ProjectNumber,FilesCheckInId FROM dbo.Project WHERE ProjectNumber=@p' @{p=$number}
- $hasProject=$pdt.Rows.Count -gt 0
+ $hasProject=$script:ProjectBatch.ContainsKey($number)
  $dbCheckIn=$null
- if($hasProject -and $pdt.Rows[0]['FilesCheckInId'] -isnot [DBNull]){$dbCheckIn=[string]$pdt.Rows[0]['FilesCheckInId']}
+ if($hasProject){$dbCheckIn=$script:ProjectBatch[$number]}
  $dbt=[Collections.Generic.Dictionary[string,object]]::new()
  if($hasProject){$dbt=DbTrusses $number}
  $out=[ordered]@{project=$number;archive=$(if($isDir){[IO.Path]::GetFileName($archivePath)+' (expanded folder)'}else{[IO.Path]::GetFileName($archivePath)});archiveTs=$ts;dbFilesCheckInId=$dbCheckIn;notInDb=(-not $hasProject);trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
@@ -524,7 +502,7 @@ const G=@@GROUPS@@,D=@@DATA@@,CL={ok:'c-ok',bad:'c-bad',stale:'c-stale',pre:'c-p
 let rules=new Set();
 function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fv(x){return x==null?'-':(typeof x==='object'?esc(JSON.stringify(x)):esc(x))}
-function det(i){const r=D[i],F=r[4]||[],CV=r[5]||{},IV=r[6]||[];let h='<tr><td colspan='+(G.length+1)+' style="background:#fafbfc">';
+function det(i){const r=D[i],F=r[4]||[],CV=r[5]||{};let h='<tr><td colspan='+(G.length+1)+' style="background:#fafbfc">';
 if(CV.compared!==undefined)h+='<p>Coverage: '+CV.compared+' compared, '+CV.different+' different, '+CV.notCompared+' not compared</p>';
 if(r[2].length)h+='<p class=note>'+r[2].map(f=>'<b>'+f[6]+'</b>: '+f[0]+' - '+esc(f[5])+(f[4]=='stale'?' (stale DB)':'')).filter((v,k,a)=>a.indexOf(v)==k).join('<br>')+'</p>';
 const bad=F.filter(f=>f.match===false),rest=F.filter(f=>f.match!==false);
@@ -534,7 +512,6 @@ const xr=extra.map(f=>'<tr class=dd><td>'+f[6]+'</td><td>'+esc(f[1])+'</td><td>-
 if(F.length||xr){h+='<table class=sbs><tr><th>Group</th><th>JSON field</th><th>DB column</th><th>DB</th><th>File (archive)</th><th>Status</th></tr>'+xr+bad.map(row).join('')+(all_.has(i)||!bad.length?rest.map(row).join(''):'')+'</table>';
 if(rest.length&&bad.length)h+='<a href="#" onclick="all_.has('+i+')?all_.delete('+i+'):all_.add('+i+');draw();return false">'+(all_.has(i)?'hide':'show')+' '+rest.length+' matching/other fields</a>';}
 else h+='<p>No values recorded.</p>';
-if(IV.length){h+='<h4 style="margin:10px 0 4px">Unconsumed field inventory (not compared)</h4><table class=sbs><tr><th>Group</th><th>JSON field</th><th>DB column</th><th>DB</th><th>File (archive)</th><th>Status</th></tr>'+IV.map(iv=>'<tr><td>'+esc(iv.group)+'</td><td>'+esc(iv.field||'-')+'</td><td>'+esc(iv.column||'-')+'</td><td>'+fv(iv.db)+'</td><td>'+fv(iv.file)+'</td><td>'+esc(iv.status||'')+(iv.note?'<br><small>'+esc(iv.note)+'</small>':'')+'</td></tr>').join('')+'</table>';}
 return h+'</td></tr>'}
 function draw(){const q=document.getElementById('q').value.toLowerCase(),ob=document.getElementById('onlyBad').checked;let n=0,h='';
 D.forEach((r,i)=>{if(ob&&!r[2].length)return;if(q&&r[0].toLowerCase().indexOf(q)<0)return;if(rules.size&&!r[2].some(f=>rules.has(f[0])))return;n++;if(n>400)return;
@@ -625,14 +602,14 @@ function WriteProject($o,$number){
    $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
   }
   if($IncludeTrussJson){
-   $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();inventory=$t.inventory.ToArray();coverage=$t.coverage}
+   $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();coverage=$t.coverage}
    $tfile=SafeName $t.name;$k=2
    while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
    WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
   }
   $cellArr=[string[]]@($Groups | ForEach-Object {$t.cells[$_]})
   $ver=if($t.version){$t.version}else{@{}}
-  $blobRows.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage,$t.inventory))
+  $blobRows.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage))
  }
  $blob=if($blobRows.Count -gt 0){(ToJson $blobRows.ToArray() 50 -compress).Replace('</','<\/')}else{'[]'}
  $cc=[ordered]@{}
@@ -654,6 +631,7 @@ $used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnore
 $i=0
 try{
 foreach($w in $work){
+ if($i % 50 -eq 0){LoadDbBatch @($work[$i..([Math]::Min($i+49,$work.Count-1))] | ForEach-Object {$_[0]})}
  $i++
  Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
  $number=$w[0]
@@ -676,6 +654,7 @@ if($IncludeDbOnly){
  Write-Host ('DB-only projects: '+$dbOnly.Count)
  $k=0
  foreach($w in $dbOnly){
+  if($k % 50 -eq 0){LoadDbBatch @($dbOnly[$k..([Math]::Min($k+49,$dbOnly.Count-1))] | ForEach-Object {$_[0]})}
   $k++
   Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
   try{$o=AnalyzeDbOnly $w[0] $w[1]}
@@ -684,7 +663,7 @@ if($IncludeDbOnly){
   WriteProject $o $w[0]
  }
 }
-}finally{$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
+}finally{LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
 
 $order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Before 2024.r7'=4;'DB only'=5}
 $ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
@@ -720,7 +699,7 @@ $contract=[ordered]@{
   'Project'='p.ProjectNumber, p.FilesCheckInId; check-in compared against archive timestamp on Server mode, informational-only on Client mode';
   'ComponentHeader'='h.Name, h.TrussFileCheckSum; name identity and .tdlTruss MD5';
   'Component'='c.ComponentQuantity; mapped as Quantity';
-  'ComponentTruss'='t.*; AnalysisVersion, CompatibilityVersion and all mapped columns';
+  'ComponentTruss'='Explicit columns only: AnalysisVersion, CompatibilityVersion and mapped columns; unmapped payloads are not fetched';
   'other'='full contract also involves DB tables not yet queried'
  };
  groups=$Groups;
@@ -742,10 +721,10 @@ $contract=[ordered]@{
  nestedPending=[ordered]@{
   'CarriedTrusses'='structured encoding pending; not string-compared';
   'JigData'='structured encoding pending; not string-compared';
-  'other nested objects/arrays'='retained in per-truss inventory, pending relational mapping; not raw-text-compared'
+  'other nested objects/arrays'='not included in output; relational mapping pending; not raw-text-compared'
  };
- lookupPending='ComponentTruss FK columns (*Key) stay in inventory and are never compared to human names; lookup table identities pending';
- coverage='compared/different/notCompared per truss and per project; values not compared are not claims of equality'
+ lookupPending='Unmapped ComponentTruss FK columns (*Key) are not fetched or compared to human names; lookup table identities pending';
+ coverage='compared/different/notCompared for mapped fields, version and checksum only; unmapped inventory excluded; values not compared are not claims of equality'
 }
 WriteText (Join-Path $outDir 'contract.json') (ToJson $contract 6)
 $index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@AGGC@@',('compared '+$agg.compared+', different '+$agg.different+', not compared '+$agg.notCompared)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString()).Replace('@@LEGEND@@',(CauseLegend))
