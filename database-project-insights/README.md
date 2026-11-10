@@ -43,7 +43,7 @@ The latest archive per project folder is used. Projects with no archive are not 
 
 Symbols in the matrix: ✓ match, ≠ mismatch, ↻ stale DB, ⏸ before 2024.r7 DB-only, ∅ not comparable.
 
-Both page types show readable check-in dates alongside the raw `Project.FilesCheckInId` and archive filename timestamp, without assuming a timezone. Causes distinguish **Archive is newer than DB**, **DB is newer than archive**, and **DB check-in is unknown**. Check-in identity is separate from truss data mismatches; Client mode remains informational only. A compact bottom legend explains symbols and comparison limits, with expandable cause definitions. Classification and mismatch counts are unchanged.
+Rows retain the compact report layout; check-in explanations are in the bottom legend. Causes use **Check-in times differ**, or **DB check-in is unknown** when the DB identifier is missing. Check-in identity is separate from truss data mismatches; Client mode remains informational only. A compact bottom legend explains symbols and comparison limits, with expandable cause definitions. Classification and mismatch counts are unchanged.
 
 ## Checks
 
