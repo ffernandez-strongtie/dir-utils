@@ -106,7 +106,7 @@ $MapMeta=[ordered]@{
 }
 $Rules=[ordered]@{
  'R-PROJ'=@('Project not in DB','Archive exists but no Project row with this number in the DB.')
- 'R-FCI'=@('DB differs from archive','DB check-in (Project.FilesCheckInId) should equal the timestamp in the archive file name.')
+ 'R-FCI'=@('Check-in differs','DB and archive represent different check-ins; this alone does not establish a truss data mismatch.')
  'R-FILE'=@('Truss missing from archive','DB truss at a current (r7+) version has no Trusses/<name>.tdlTruss in the archive; the .tdlTruss controls membership and JSON is never membership. Before 2024.r7 DB-only trusses are expected and excluded.')
  'R-DB'=@('Truss missing from DB','Trusses/<name>.tdlTruss exists in the archive but no ComponentHeader row with that name; the .tdlTruss controls membership and JSON is never membership.')
  'R-DUP'=@('Duplicate truss in DB','More than one DB row for the same truss name.')
@@ -463,6 +463,35 @@ function StateOf($o){
  if($o.findings.Count -gt 0){return 'Stale DB'}
  'Consistent'
 }
+function RuleName($f){
+ if($f.rule -ne 'R-FCI'){return $Rules[$f.rule][0]}
+ if([string]::IsNullOrWhiteSpace([string]$f.db)){return 'DB check-in is unknown'}
+ if([string]::CompareOrdinal([string]$f.db,[string]$f.file) -lt 0){return 'Archive is newer than DB'}
+ 'DB is newer than archive'
+}
+function CheckInDate($value){
+ if([string]::IsNullOrWhiteSpace([string]$value)){return 'Unknown'}
+ $date=[datetime]::MinValue
+ if([datetime]::TryParseExact([string]$value,'yyyyMMddHHmmss',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$date)){return $date.ToString('MMM d, yyyy, HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)}
+ 'Unrecognized timestamp'
+}
+function CheckInHtml($o){
+ $label=if($Client){'Check-ins (informational only in Client mode)'}elseif($o.notInDb){'No DB project to compare'}elseif($o.dbOnly){'No archive to compare'}elseif(-not $o.archiveTs){'Archive check-in is unknown'}elseif($o.dbFilesCheckInId -eq $o.archiveTs){'Same check-in'}else{RuleName @{rule='R-FCI';db=$o.dbFilesCheckInId;file=$o.archiveTs}}
+ '<div class="check-in"><b>'+(Esc $label)+'</b><br>DB check-in: '+(Esc (CheckInDate $o.dbFilesCheckInId))+' <small>(Project.FilesCheckInId: <code>'+(Esc $o.dbFilesCheckInId)+'</code>)</small><br>Archive check-in: '+(Esc (CheckInDate $o.archiveTs))+' <small>(archive filename timestamp: <code>'+(Esc $o.archiveTs)+'</code>)</small><br><small>No timezone assumed. Check-in identity is separate from truss value comparisons.</small></div>'
+}
+function CauseDefinitions{
+ $causes=[ordered]@{
+  'Archive is newer than DB'='The archive filename identifies a later check-in than Project.FilesCheckInId. Applicable truss differences are marked stale, not real mismatches.'
+  'DB is newer than archive'='The selected archive identifies an earlier check-in than the DB. This does not by itself prove a truss data mismatch.'
+  'DB check-in is unknown'='Project.FilesCheckInId is missing; the relative age of the DB and archive cannot be determined.'
+ }
+ foreach($key in $Rules.Keys){if($key -notin @('R-FCI','R-TDL')){$causes[$Rules[$key][0]]=$Rules[$key][1]}}
+ return ,$causes
+}
+function CauseLegend{
+ $items=foreach($entry in (CauseDefinitions).GetEnumerator()){'<div><b>'+(Esc $entry.Key)+'</b> &mdash; '+(Esc $entry.Value)+'</div>'}
+ '<footer class="cause-legend"><h3>How to read this report</h3><p>&#10003; Compared values match &middot; &#8800; Real mismatch &middot; &#8635; Stale DB (archive newer) &middot; &#9208; Before 2024.r7 (expected DB-only data) &middot; &#8709; Not comparable.</p><p>Consistent means the compared values agree, not that every field was verified. Missing JSON means values are not compared; only .tdlTruss files establish file-side truss existence. Check-in dates come from identifiers, not file modification times; no timezone is assumed. Client mode does not compare check-ins.</p><details><summary>Cause definitions</summary>'+($items -join '')+'</details></footer>'
+}
 function VerdictOf($o,$st){
  $n=$o.counts.trusses
  switch($st){
@@ -470,7 +499,7 @@ function VerdictOf($o,$st){
   'Not in DB'{'Archive exists, but the project is not in the DB'}
   'DB only'{'In the DB, but no archive folder on disk. DB values only; nothing to compare.'}
   'Before 2024.r7'{'Frozen before 2024.r7 DB state; no Studio files to compare.'}
-  'Stale DB'{"DB older than the archive (re-saved in Studio). $($o.counts.stale) of $n trusses differ."}
+  'Stale DB'{if($o.staleProject){"Archive is newer than DB. $($o.counts.stale) of $n trusses have stale differences."}else{'Check-in warning; see check-in details. This alone does not establish a truss data mismatch.'}}
   default{"$($o.counts.bad) of $n trusses have real mismatches."}
  }
 }
@@ -487,6 +516,7 @@ input[type=text]{padding:6px 9px;border:1px solid #b8c2cc;border-radius:4px;widt
 table{border-collapse:collapse;background:#fff;width:100%;box-shadow:0 1px 2px #0002}th,td{padding:6px 10px;border-bottom:1px solid #e3e8ed;text-align:left;vertical-align:top}th{background:#eef1f4;position:sticky;top:0}
 .chip{display:inline-block;background:#eef1f4;border-radius:4px;padding:1px 6px;margin:1px;font-size:12px;cursor:pointer;border:1px solid transparent}.chip.on{border-color:#0b5cad;background:#dcebfa}
 .cell{width:90px;text-align:center;white-space:nowrap;cursor:pointer;font-weight:700}.c-ok{background:#d6f1de;color:#0d5c28}.c-bad{background:#f4b9b3;color:#8a160c}.c-pre{background:#d5d9de;color:#4a5560}.c-stale{background:#fdebc8;color:#7a4b00}.c-na{background:#f3f3f3;color:#aaa}
+.check-in{margin-top:8px;font-size:12px;line-height:1.6}.check-in small{color:#526170}.cause-legend{margin-top:24px;padding:12px 16px;border-top:1px solid #c9d2db;color:#4a5560;font-size:12px}.cause-legend h3{margin:0;font-size:14px}.cause-legend p{margin:6px 0}.cause-legend summary{cursor:pointer;font-weight:600}.cause-legend details div{margin:6px 0}
 .legend span{margin-right:14px;font-size:12px}.sw{display:inline-block;width:12px;height:12px;vertical-align:-1px;margin-right:4px;border-radius:2px}
 .sbs td{font-family:Consolas,monospace;font-size:12px;word-break:break-all}.sbs .d{background:#fbe3e0}.sbs .f{background:#e3f1e6}
 .dd td{font-weight:600}.note{background:#fff8e1;border-left:4px solid #e0a800;padding:6px 10px;margin:8px 0;font-size:13px}
@@ -499,7 +529,8 @@ $ProjectTemplate=@'
 <main><div class="legend"><span><i class="sw c-ok"></i>matches</span><span><i class="sw c-bad"></i>real mismatch</span><span><i class="sw c-stale"></i>stale DB (file newer)</span><span><i class="sw c-pre"></i>before 2024.r7 DB-only (expected)</span><span><i class="sw c-na"></i>not comparable</span></div>
 <p>Filter by issue: @@CHIPS@@</p>
 <p><input type=text id=q placeholder="filter truss name"> <label><input type=checkbox id=onlyBad checked> only trusses with findings</label> <span id=cnt></span></p>
-<table style="table-layout:fixed"><thead><tr><th>Truss</th>@@HEADERS@@<th class=cell style="width:220px">Version (file / DB)</th></tr></thead><tbody id=tb></tbody></table></main>
+@@CHECKIN@@
+<table style="table-layout:fixed"><thead><tr><th>Truss</th>@@HEADERS@@<th class=cell style="width:220px">Version (file / DB)</th></tr></thead><tbody id=tb></tbody></table>@@LEGEND@@</main>
 <script>
 const G=@@GROUPS@@,D=@@DATA@@,CL={ok:'c-ok',bad:'c-bad',stale:'c-stale',pre:'c-pre',na:'c-na'},SY={ok:'&#10003;',bad:'&#8800;',stale:'&#8635;',pre:'&#9208;',na:'&#8709;'},open_=new Set(),all_=new Set();
 let rules=new Set();
@@ -535,7 +566,7 @@ $IndexTemplate=@'
 <main><div class="tabs">@@TABS@@</div>
 <p><input type=text id=q placeholder="filter project number"> Issue: @@CHIPS@@</p>
 <table><thead><tr><th>Project</th><th>State</th><th>Verdict</th><th>Top causes</th><th>Trusses</th></tr></thead><tbody id=tb>@@ROWS@@</tbody></table>
-</main>
+@@LEGEND@@</main>
 <script>let t='Inconsistent';const cs=new Set();function f(){const q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#tb tr').forEach(r=>{const rc=(r.dataset.c||'').split('|');r.style.display=(r.dataset.s==t&&r.textContent.toLowerCase().indexOf(q)>=0&&(!cs.size||[...cs].some(c=>rc.includes(c))))?'':'none'})}
 document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x==e));f()});document.querySelectorAll('.chip').forEach(e=>e.onclick=()=>{const c=e.dataset.c;cs.has(c)?cs.delete(c):cs.add(c);e.classList.toggle('on');f()});document.getElementById('q').oninput=f;</script>
 '@
@@ -593,7 +624,7 @@ function WriteProject($o,$number){
  $summary=[ordered]@{project=$number;mode=$(if($Client){'Client'}else{'Server'});database=$Database;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($Client){$null}elseif($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null});status=$(if($Client){'informational-only'}else{'compared'})});trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);coverage=$cov;trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
  WriteText (Join-Path $dir 'summary.json') (ToJson $summary 4)
  $flat=[Collections.Generic.List[object]]::new()
- foreach($f in $o.findings){$flat.Add([ordered]@{ruleId=$f.rule;ruleName=$Rules[$f.rule][0];rule=$Rules[$f.rule][1];project=$number;truss=$f.truss;field=$f.field;dbValue=$f.db;fileValue=$f.file;severity=$f.sev})}
+ foreach($f in $o.findings){$flat.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);rule=$Rules[$f.rule][1];project=$number;truss=$f.truss;field=$f.field;dbValue=$f.db;fileValue=$f.file;severity=$f.sev})}
  WriteText (Join-Path $dir 'findings.json') (ToJson $flat.ToArray() 4)
  $blobRows=[Collections.Generic.List[object]]::new()
  $tn=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -601,8 +632,8 @@ function WriteProject($o,$number){
   $tf=[Collections.Generic.List[object]]::new()
   $fl=[Collections.Generic.List[object]]::new()
   foreach($f in $t.findings){
-   $tf.Add([ordered]@{ruleId=$f.rule;ruleName=$Rules[$f.rule][0];field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
-   $fl.Add([object[]]@($Rules[$f.rule][0],$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
+   $tf.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
+   $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
   }
   $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();inventory=$t.inventory.ToArray();coverage=$t.coverage}
   $tfile=SafeName $t.name;$k=2
@@ -614,7 +645,7 @@ function WriteProject($o,$number){
  }
  $blob=if($blobRows.Count -gt 0){(ToJson $blobRows.ToArray() 50 -compress).Replace('</','<\/')}else{'[]'}
  $cc=[ordered]@{}
- foreach($f in $o.findings){$nm=$Rules[$f.rule][0];if($cc.Contains($nm)){$cc[$nm]++}else{$cc[$nm]=1}}
+ foreach($f in $o.findings){$nm=RuleName $f;if($cc.Contains($nm)){$cc[$nm]++}else{$cc[$nm]=1}}
  $o.cats=$cc
  $chips=(($cc.Keys | Sort-Object | ForEach-Object {
   '<span class="chip" data-r="'+(Esc $_)+'">'+(Esc $_)+' ('+$cc[$_]+')</span>'
@@ -622,7 +653,7 @@ function WriteProject($o,$number){
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
  $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'+' | coverage '+$cov.compared+' compared, '+$cov.different+' different, '+$cov.notCompared+' not compared | <a href="../../contract.json">contract.json</a>'
- $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
+ $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@CHECKIN@@',(CheckInHtml $o)).Replace('@@LEGEND@@',(CauseLegend)).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
  WriteText (Join-Path $dir 'project.html') $page
  [void]$results.Add($o)
  $o.trusses=$null
@@ -672,11 +703,11 @@ if($IncludeDbOnly){$tabNames+='DB only'}
 $tabCount=$cnt
 $tabHints=@{'Inconsistent'='Files and database disagree';'Stale DB'='Database older than archive';'Not in DB'='Archive has no project row';'Consistent'='No differences in compared values';'Before 2024.r7'='Database is the source';'DB only'='No archive folder'}
 $tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'"><b>'+$tabCount[$_]+'</b>'+$_+'<br><span>'+$tabHints[$_]+'</span></div>'}) -join '')
-$allChips=(($Rules.Values | ForEach-Object {'<span class="chip" data-c="'+(Esc $_[0])+'" title="'+(Esc $_[1])+'">'+(Esc $_[0])+'</span>'}) -join '')
+$allChips=(((CauseDefinitions).GetEnumerator() | ForEach-Object {'<span class="chip" data-c="'+(Esc $_.Key)+'" title="'+(Esc $_.Value)+'">'+(Esc $_.Key)+'</span>'}) -join '')
 $sb=[Text.StringBuilder]::new()
 foreach($o in $ranked){
  $top=(($o.cats.GetEnumerator() | Sort-Object @{Expression={-$_.Value}},@{Expression={$_.Key}} | Select-Object -First 2 | ForEach-Object {'<span class="badge b-pre">'+(Esc $_.Key)+' '+$_.Value+'</span>'}) -join '')
- [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
+ [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+(Esc (VerdictOf $o $o.state))+(CheckInHtml $o)+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
 }
 $agg=[ordered]@{compared=0;different=0;notCompared=0}
 foreach($o in $ranked){$agg.compared+=$o.coverage.compared;$agg.different+=$o.coverage.different;$agg.notCompared+=$o.coverage.notCompared}
@@ -726,7 +757,7 @@ $contract=[ordered]@{
  coverage='compared/different/notCompared per truss and per project; values not compared are not claims of equality'
 }
 WriteText (Join-Path $outDir 'contract.json') (ToJson $contract 6)
-$index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@AGGC@@',('compared '+$agg.compared+', different '+$agg.different+', not compared '+$agg.notCompared)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString())
+$index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@AGGC@@',('compared '+$agg.compared+', different '+$agg.different+', not compared '+$agg.notCompared)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString()).Replace('@@LEGEND@@',(CauseLegend))
 WriteText (Join-Path $outDir 'index.html') $index
 Write-Host ''
 Write-Host ('Projects: '+$ranked.Count)
