@@ -50,6 +50,7 @@ foreach($inputName in @('ProjectsRoot','Server','Database','OutputDirectory')) {
 }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 if($Server -ieq 'SST'){$Server='.\SST'}
+$script:TrussColumns=$null
 $Groups=@('Identity','Version','Geometry','Pitch','Flags')
 $Map=[ordered]@{
  'Quantity'='ComponentQuantity';'NumPlies'='TrussPlyCount';'Thickness'='TrussThicknessInches';'OverallTrussHeight'='OverallTrussHeightInches';'LeftOverhang'='LeftOverhangInches';'RightOverhang'='RightOverhangInches';'LeftCantilever'='LeftCantileverInches';'RightCantilever'='RightCantileverInches';'LeftHeelHeight'='LeftHeelHeightInches';'RightHeelHeight'='RightHeelHeightInches';'PitchLeftTopOver12'='LeftTopPitchOver12';'PitchRightTopOver12'='RightTopPitchOver12';'PitchLeftBottomOver12'='LeftBottomPitchOver12';'PitchRightBottomOver12'='RightBottomPitchOver12';'IsAttic'='IsAttic';'IsGable'='IsGable';'IsGirder'='IsGirder';'IsFlipped'='IsFlipped';'OCSpacing'='OCSpacing'
@@ -251,9 +252,15 @@ function LoadDbBatch([string[]]$numbers){
   $number=[string]$r['ProjectNumber']
   $script:ProjectBatch[$number]=$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']})
  }
+ if($null -eq $script:TrussColumns){
+  $schema=Q "SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.ComponentTruss')" @{}
+  if(-not $schema.Rows.Count){throw 'Cannot read dbo.ComponentTruss column metadata; comparison cannot safely continue.'}
+  $script:TrussColumns=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  foreach($column in $schema.Rows){[void]$script:TrussColumns.Add([string]$column['name'])}
+ }
  $columns=@('AnalysisVersion','CompatibilityVersion')+@($Map.Values | Where-Object {$_ -ne 'ComponentQuantity'})
- $select=(@($columns | Sort-Object -Unique | ForEach-Object {'t.['+$_.Replace(']',']]')+']'}) -join ',')
- $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,c.ComponentQuantity,'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params
+ $select=(@($columns | Sort-Object -Unique | Where-Object {$script:TrussColumns.Contains($_)} | ForEach-Object {',t.['+$_.Replace(']',']]')+']'}) -join '')
+ $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params
  foreach($r in $dt.Rows){
   $number=[string]$r['ProjectNumber']
   if(-not $script:TrussBatch.ContainsKey($number)){$script:TrussBatch[$number]=[Collections.Generic.Dictionary[string,object]]::new()}
