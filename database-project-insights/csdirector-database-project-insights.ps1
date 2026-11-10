@@ -107,8 +107,8 @@ $MapMeta=[ordered]@{
 $Rules=[ordered]@{
  'R-PROJ'=@('Project not in DB','Archive exists but no Project row with this number in the DB.')
  'R-FCI'=@('DB differs from archive','DB check-in (Project.FilesCheckInId) should equal the timestamp in the archive file name.')
- 'R-FILE'=@('Truss missing from archive','DB truss at a current (r7+) version has no Trusses/generated/<name>.json in the archive. Before 2024.r7 DB-only trusses are expected and excluded.')
- 'R-DB'=@('Truss missing from DB','Truss file exists in the archive but no ComponentHeader row with that name.')
+ 'R-FILE'=@('Truss missing from archive','DB truss at a current (r7+) version has no Trusses/<name>.tdlTruss in the archive; the .tdlTruss controls membership and JSON is never membership. Before 2024.r7 DB-only trusses are expected and excluded.')
+ 'R-DB'=@('Truss missing from DB','Trusses/<name>.tdlTruss exists in the archive but no ComponentHeader row with that name; the .tdlTruss controls membership and JSON is never membership.')
  'R-DUP'=@('Duplicate truss in DB','More than one DB row for the same truss name.')
  'R-CKSUM'=@('Truss file checksum differs','MD5 of Trusses/<name>.tdlTruss should equal ComponentHeader.TrussFileCheckSum.')
  'R-TDL'=@('Truss file missing','No .tdlTruss to checksum.')
@@ -325,7 +325,7 @@ function FillFields($row,$j,$r,$h,$F,$stale,$cut){
  if($cst -eq 'compared'){$cst=$(if($cm){'match'}else{'differ'})}
  $row.fields.Add([ordered]@{field='TdlTrussMD5';group='Identity';column='TrussFileCheckSum';db=$dk;file=$h;match=$cm;status=$cst})
  if($cst -eq 'match' -and $row.cells['Identity'] -eq 'na'){$row.cells['Identity']='ok'}
- if($null -ne $j -and $null -ne $r -and $cm -eq $false){AddF $row $F $stale 'R-CKSUM' 'TrussFileCheckSum' ([string]$dk) $h '.tdlTruss MD5 differs from DB checksum' 'Identity'}
+ if($null -ne $r -and $cm -eq $false){AddF $row $F $stale 'R-CKSUM' 'TrussFileCheckSum' ([string]$dk) $h '.tdlTruss MD5 differs from DB checksum' 'Identity'}
  foreach($fld in $Map.Keys){
   $meta=$MapMeta[$fld]
   $col=$Map[$fld]
@@ -401,8 +401,8 @@ function AnalyzeProject($number,$archivePath,$cut){
    }
   }
   $names=[Collections.Generic.List[string]]::new()
-  foreach($k in $files.Keys){$names.Add($k)}
-  foreach($k in $dbt.Keys){if(-not $files.ContainsKey($k)){$names.Add($k)}}
+  foreach($k in $tdl.Keys){$names.Add($k)}
+  foreach($k in $dbt.Keys){if(-not $tdl.ContainsKey($k)){$names.Add($k)}}
   $names.Sort([StringComparer]::Ordinal)
   foreach($name in $names){
    $row=[ordered]@{name=$name;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
@@ -410,18 +410,18 @@ function AnalyzeProject($number,$archivePath,$cut){
    if($dbt.ContainsKey($name)){$rows=$dbt[$name]}
    $r=$null;if($rows){$r=$rows[0]}
    $j=$null;$h=$null
-   if($files.ContainsKey($name)){$j=ReadEntryJson $files[$name]}
+   if($tdl.ContainsKey($name) -and $files.ContainsKey($name)){$j=ReadEntryJson $files[$name]}
    if($tdl.ContainsKey($name)){
     $md5=[Security.Cryptography.MD5]::Create()
     try{$h=[BitConverter]::ToString($md5.ComputeHash((ReadEntryBytes $tdl[$name])))}finally{$md5.Dispose()}
    }
-   if($null -eq $j){
+   if(-not $tdl.ContainsKey($name)){
     $av=$null
     if($r){$av=ParseVer $r['AnalysisVersion']}
     if($r -and $null -ne $av -and (VerLess $av $cut)){
      $row.cells=Cells 'pre';$row.pre=$true
     }else{
-     AddF $row $F $stale 'R-FILE' ('Trusses/generated/'+$name+'.json') 'present' 'missing' 'Truss in DB but no file in archive' 'Identity'
+     AddF $row $F $stale 'R-FILE' ('Trusses/'+$name+'.tdlTruss') 'present' 'missing' 'Truss in DB but no .tdlTruss in archive' 'Identity'
      $row.cells=IdentityOnly $row.cells['Identity']
     }
     FillFields $row $null $r $h $F $stale $cut
@@ -434,7 +434,10 @@ function AnalyzeProject($number,$archivePath,$cut){
     $out.trusses.Add($row);continue
    }
    if($rows.Count -gt 1){AddF $row $F $stale 'R-DUP' 'ComponentHeader.Name' $rows.Count 1 'Duplicate truss name rows in DB' 'Identity'}
-   if(-not $tdl.ContainsKey($name)){AddF $row $F $stale 'R-TDL' ('Trusses/'+$name+'.tdlTruss') 'n/a' 'missing' 'No .tdlTruss for truss' 'Identity' 'warn'}
+   if($null -eq $j){
+    $av=ParseVer $r['AnalysisVersion']
+    if($null -ne $av -and (VerLess $av $cut)){$row.cells=Cells 'pre';$row.pre=$true}
+   }
    FillFields $row $j $r $h $F $stale $cut
    $out.trusses.Add($row)
   }
@@ -707,7 +710,7 @@ $contract=[ordered]@{
   nulls='missing values are never matches; missing field, absent DB column, database NULL, file NULL and missing side are distinguished; a both-null pair is unknown, not true and distinct from both sides absent'
  };
  identityContract=[ordered]@{
-  name='Truss name: ComponentHeader.Name <-> Trusses/generated/<name>.json and Trusses/<name>.tdlTruss';
+  name='Truss name: Trusses/<name>.tdlTruss controls membership against ComponentHeader.Name; Trusses/generated/<name>.json is comparison data only and is read only when the .tdlTruss exists';
   checksum='.tdlTruss MD5 <-> ComponentHeader.TrussFileCheckSum';
   version='JSON Version <-> ComponentTruss.AnalysisVersion';
   checkIn='Project.FilesCheckInId <-> archive timestamp; informational-only on Client mode (archive timestamp is not compared there)'
