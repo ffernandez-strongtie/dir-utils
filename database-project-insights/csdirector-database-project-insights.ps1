@@ -55,7 +55,7 @@ $Groups=@('Identity','Version','Geometry','Pitch','Flags')
 $Map=[ordered]@{
  'Quantity'='ComponentQuantity';'NumPlies'='TrussPlyCount';'Thickness'='TrussThicknessInches';'OverallTrussHeight'='OverallTrussHeightInches';'LeftOverhang'='LeftOverhangInches';'RightOverhang'='RightOverhangInches';'LeftCantilever'='LeftCantileverInches';'RightCantilever'='RightCantileverInches';'LeftHeelHeight'='LeftHeelHeightInches';'RightHeelHeight'='RightHeelHeightInches';'PitchLeftTopOver12'='LeftTopPitchOver12';'PitchRightTopOver12'='RightTopPitchOver12';'PitchLeftBottomOver12'='LeftBottomPitchOver12';'PitchRightBottomOver12'='RightBottomPitchOver12';'IsAttic'='IsAttic';'IsGable'='IsGable';'IsGirder'='IsGirder';'IsFlipped'='IsFlipped';'OCSpacing'='OCSpacing'
  'Height'='TrussHeightInches';'LeftHeelToPeak'='LeftHeelToPeakInches';'RightHeelToPeak'='RightHeelToPeakInches';'LeftTopChordHeelToPeak'='LeftTopChordHeelToPeakInches';'RightTopChordHeelToPeak'='RightTopChordHeelToPeakInches';'LeftStub'='LeftStubInches';'RightStub'='RightStubInches';'TCPitchCount'='TopChordPitchCount';'BCPitchCount'='BottomChordPitchCount';'Camber'='Camber';'CamberDistance'='CamberDistanceInches';'CamberNote'='CamberNote';'BearingPadNotes'='BearingPadNotes';'LeftOverhangRake'='LeftOverhangRake';'RightOverhangRake'='RightOverhangRake';'SinglePlyOverhang'='SinglePlyOverhang';'SinglePlyFill'='SinglePlyFill';'FillPly'='FillPly';'OverhangPly'='OverhangPly';'TCRakeFirst'='TCRakeFirst';'TCRakeLast'='TCRakeLast';'CompatibilityVersion'='CompatibilityVersion';'TrussMatchCode'='TrussMatchCode'
- 'Span'='TrussSpanInches';'ProdSpan'='FullSpanInches';'IsStructural'='IsStructuralGable';'Weight'='WeightPounds';'PlyToPlyNote'='PlyToPly'
+ 'Span'='TrussSpanInches';'ProdSpan'='FullSpanInches';'IsStructural'='IsStructuralGable';'Weight'='WeightPounds';'PlyToPlyNote'='PlyToPly';'IsSymmetric'='IsSymmetrical'
 }
 $MapMeta=[ordered]@{
  'Quantity'=[ordered]@{group='Identity';policy='int';basis='observed I-4028'}
@@ -100,11 +100,12 @@ $MapMeta=[ordered]@{
  'TCRakeLast'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
  'CompatibilityVersion'=[ordered]@{group='Version';policy='text';basis='observed I-4028'}
  'TrussMatchCode'=[ordered]@{group='Geometry';policy='text';basis='observed I-4028'}
- 'Span'=[ordered]@{group='Geometry';policy='numeric';basis='candidate'}
- 'ProdSpan'=[ordered]@{group='Geometry';policy='numeric';basis='candidate'}
- 'IsStructural'=[ordered]@{group='Flags';policy='bool';basis='candidate'}
- 'Weight'=[ordered]@{group='Geometry';policy='numeric';basis='candidate'}
- 'PlyToPlyNote'=[ordered]@{group='Geometry';policy='text';basis='candidate'}
+ 'Span'=[ordered]@{group='Geometry';policy='numeric';basis='persistence mapping Nov 5, 2026'}
+ 'ProdSpan'=[ordered]@{group='Geometry';policy='numeric';basis='persistence mapping Nov 5, 2026'}
+ 'IsStructural'=[ordered]@{group='Flags';policy='bool';basis='persistence mapping Nov 5, 2026'}
+ 'Weight'=[ordered]@{group='Geometry';policy='numeric';basis='persistence mapping Nov 5, 2026'}
+ 'PlyToPlyNote'=[ordered]@{group='Geometry';policy='text';basis='persistence mapping Nov 5, 2026'}
+ 'IsSymmetric'=[ordered]@{group='Flags';policy='bool';basis='persistence mapping Nov 5, 2026'}
 }
 $Rules=[ordered]@{
  'R-PROJ'=@('Project not in DB','Archive exists but no Project row with this number in the DB.')
@@ -115,7 +116,7 @@ $Rules=[ordered]@{
  'R-CKSUM'=@('Truss file checksum differs','MD5 of Trusses/<name>.tdlTruss should equal ComponentHeader.TrussFileCheckSum.')
  'R-TDL'=@('Truss file missing','No .tdlTruss to checksum.')
  'R-VER'=@('Truss version differs','Truss JSON Version should equal ComponentTruss.AnalysisVersion. Reported as stale when the DB is frozen before 2024.r7 and the file is current.')
- 'R-FLD'=@('Truss value differs','Mapped truss JSON field should equal its ComponentTruss/Component column (tolerance 0.001).')
+ 'R-FLD'=@('Truss value differs','Mapped truss JSON field should equal its ComponentHeader/Component/ComponentTruss column (tolerance 0.001).')
 }
 $StaleRules=@('R-CKSUM','R-DB','R-FLD','R-VER','R-FILE')
 $Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Before 2024.r7'='b-pre';'Stale DB'='b-warn';'Not in DB'='b-warn';'DB only'='b-pre'}
@@ -240,6 +241,23 @@ function ReadEntryJson($entry){
  try{$t=$r.ReadToEnd()}finally{$r.Dispose()}
  $t | ConvertFrom-Json
 }
+function DbBatchEnd($items,[int]$start){
+ $last=[Math]::Min($start+49,$items.Count-1)
+ $params=@{};$names=for($i=$start;$i -le $last;$i++){$key='p'+($i-$start);$params[$key]=[string]$items[$i][0];'@'+$key}
+ $dt=Q ('SELECT p.ProjectNumber,COUNT_BIG(*) AS TrussCount FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+($names -join ',')+') GROUP BY p.ProjectNumber') $params
+ $counts=@{};foreach($r in $dt.Rows){$counts[[string]$r['ProjectNumber']]=[long]$r['TrussCount']}
+ $total=0L;$end=$start
+ for($i=$start;$i -le $last;$i++){
+  $count=[long]$counts[[string]$items[$i][0]]
+  if($i -gt $start -and $total+$count -gt 10000){break}
+  $total+=$count;$end=$i
+ }
+ $end
+}
+function ReleaseProject($number){
+ [void]$script:TrussBatch.Remove($number)
+ [void]$script:ProjectBatch.Remove($number)
+}
 function LoadDbBatch([string[]]$numbers){
  if($numbers.Count -gt 50){throw 'DB batch exceeds 50 projects.'}
  $script:ProjectBatch=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -258,9 +276,9 @@ function LoadDbBatch([string[]]$numbers){
   $script:TrussColumns=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   foreach($column in $schema.Rows){[void]$script:TrussColumns.Add([string]$column['name'])}
  }
- $columns=@('AnalysisVersion','CompatibilityVersion')+@($Map.Values | Where-Object {$_ -ne 'ComponentQuantity'})
+ $columns=@('AnalysisVersion','CompatibilityVersion')+@($Map.Values | Where-Object {$_ -notin @('ComponentQuantity','WeightPounds','IsSymmetrical')})
  $select=(@($columns | Sort-Object -Unique | Where-Object {$script:TrussColumns.Contains($_)} | ForEach-Object {',t.['+$_.Replace(']',']]')+']'}) -join '')
- $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params
+ $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,h.WeightPounds,h.IsSymmetrical,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params
  foreach($r in $dt.Rows){
   $number=[string]$r['ProjectNumber']
   if(-not $script:TrussBatch.ContainsKey($number)){$script:TrussBatch[$number]=[Collections.Generic.Dictionary[string,object]]::new()}
@@ -630,44 +648,49 @@ function WriteProject($o,$number){
  $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'+' | coverage '+$cov.compared+' compared, '+$cov.different+' different, '+$cov.notCompared+' not compared | <a href="../../contract.json">contract.json</a>'
  $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@LEGEND@@',(CauseLegend)).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
  WriteText (Join-Path $dir 'project.html') $page
- [void]$results.Add($o)
- $o.trusses=$null
+ $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
+ [void]$results.Add($indexRow)
 }
 $results=[Collections.Generic.List[object]]::new()
 $used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$i=0
+$i=0;$batchEnd=-1
 try{
 foreach($w in $work){
- if($i % 50 -eq 0){LoadDbBatch @($work[$i..([Math]::Min($i+49,$work.Count-1))] | ForEach-Object {$_[0]})}
+ if($i -gt $batchEnd){$batchEnd=DbBatchEnd $work $i;LoadDbBatch @($work[$i..$batchEnd] | ForEach-Object {$_[0]})}
  $i++
  Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
  $number=$w[0]
- try{$o=AnalyzeProject $number $w[1] $cut}
- catch{Write-Warning ($number+": "+$_.Exception.Message+" @ "+$_.InvocationInfo.ScriptLineNumber);continue}
- WriteProject $o $number
+ try{
+  try{$o=AnalyzeProject $number $w[1] $cut}
+  catch{Write-Warning ($number+": "+$_.Exception.Message+" @ "+$_.InvocationInfo.ScriptLineNumber);continue}
+  WriteProject $o $number
+ }finally{ReleaseProject $number;$o=$null}
 }
 if($IncludeDbOnly){
  $have=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
  foreach($d in (Get-ChildItem -LiteralPath $root -Directory)){[void]$have.Add($d.Name)}
  $dbp=Q 'SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p ORDER BY p.ProjectNumber' @{}
- $dbOnly=@()
+ $dbOnly=[Collections.Generic.List[object]]::new()
  foreach($r in $dbp.Rows){
   $pn=[string]$r['ProjectNumber']
   if($have.Contains($pn)){continue}
   if($ProjectId -and ($ProjectId -notcontains $pn)){continue}
-  $dbOnly+=,@($pn,$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']}))
+  $dbOnly.Add(@($pn,$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']})))
  }
  if($Limit -gt 0){$dbOnly=@($dbOnly | Select-Object -First $Limit)}
  Write-Host ('DB-only projects: '+$dbOnly.Count)
- $k=0
+ $dbp=$null
+ $k=0;$batchEnd=-1
  foreach($w in $dbOnly){
-  if($k % 50 -eq 0){LoadDbBatch @($dbOnly[$k..([Math]::Min($k+49,$dbOnly.Count-1))] | ForEach-Object {$_[0]})}
+  if($k -gt $batchEnd){$batchEnd=DbBatchEnd $dbOnly $k;LoadDbBatch @($dbOnly[$k..$batchEnd] | ForEach-Object {$_[0]})}
   $k++
   Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
-  try{$o=AnalyzeDbOnly $w[0] $w[1]}
-  catch{Write-Warning ($w[0]+": "+$_.Exception.Message);continue}
-  $o.state='DB only'
-  WriteProject $o $w[0]
+  try{
+   try{$o=AnalyzeDbOnly $w[0] $w[1]}
+   catch{Write-Warning ($w[0]+": "+$_.Exception.Message);continue}
+   $o.state='DB only'
+   WriteProject $o $w[0]
+  }finally{ReleaseProject $w[0];$o=$null}
  }
 }
 }finally{LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
@@ -691,7 +714,7 @@ foreach($o in $ranked){$agg.compared+=$o.coverage.compared;$agg.different+=$o.co
 $contractFields=[Collections.Generic.List[object]]::new()
 foreach($k in $Map.Keys){
  $m=$MapMeta[$k]
- $contractFields.Add([ordered]@{field=$k;column=$Map[$k];group=$m.group;policy=$m.policy;basis=$m.basis;status=$(if($m.basis -eq 'candidate'){'candidate (not confirmed)'}else{'mapped'})})
+ $contractFields.Add([ordered]@{field=$k;column=$Map[$k];table=$(if($k -in @('Weight','IsSymmetric')){'ComponentHeader'}elseif($k -eq 'Quantity'){'Component'}else{'ComponentTruss'});group=$m.group;policy=$m.policy;basis=$m.basis;status=$(if($m.basis -eq 'candidate'){'candidate (not confirmed)'}else{'mapped'})})
 }
 $contract=[ordered]@{
  name='csdirector-database-project-insights contract';
@@ -704,7 +727,7 @@ $contract=[ordered]@{
  archive='latest .csdproj per project folder (or expanded project folder on Client mode)';
  sourceTables=[ordered]@{
   'Project'='p.ProjectNumber, p.FilesCheckInId; check-in compared against archive timestamp on Server mode, informational-only on Client mode';
-  'ComponentHeader'='h.Name, h.TrussFileCheckSum; name identity and .tdlTruss MD5';
+  'ComponentHeader'='h.Name, h.TrussFileCheckSum, h.WeightPounds, h.IsSymmetrical; name identity, .tdlTruss MD5, Weight and IsSymmetric';
   'Component'='c.ComponentQuantity; mapped as Quantity';
   'ComponentTruss'='Explicit columns only: AnalysisVersion, CompatibilityVersion and mapped columns; unmapped payloads are not fetched';
   'other'='full contract also involves DB tables not yet queried'

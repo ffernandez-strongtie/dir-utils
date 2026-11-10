@@ -53,7 +53,7 @@ Truss membership is the union of `Trusses/<name>.tdlTruss` in the archive and `C
 
 Coverage counts per truss and the project aggregate (`compared`, `different`, `notCompared`) cover mapped fields, version and checksum only; values that were not compared are not claims of equality. Unmapped field inventories are no longer built or included in HTML or JSON, so `notCompared` totals exclude those former inventory entries. Nested/structured mappings and FK lookup identities remain pending in `contract.json`; FK columns are never compared to human names.
 
-Database reads use batches of up to 50 selected projects, with one check-in query and one truss query per batch. The previous batch cache is replaced, rather than loading all projects' trusses at once. A one-time metadata query checks which `ComponentTruss` columns exist. Absent mapped columns are omitted from SQL and shown as not compared, never as matches (candidate mappings remain unresolved); unavailable metadata stops the run with an explicit error. Queries select only identity, checksum, version and available mapped columns (including unresolved candidates); unused large columns such as `JigData` and `CarriedTrusses` are not fetched. `-ProjectId` and `-Limit` are applied before truss batches are loaded, including the DB-only path. No timing instrumentation is added.
+Database reads use batches of up to 50 selected projects and a target maximum of 10,000 truss rows, chosen by a lightweight count query before each batch. A single project above that target is processed on its own; its detail is not split. Each batch then uses one check-in query and one truss query. Cached DB rows are released after each project (including analysis failures), and the cache is replaced between batches. Completed projects retain only compact index summaries (identity, state, counts, coverage and cause totals), not trusses or individual findings. Project detail files and index layout remain unchanged; summary memory grows with project count, not total truss/finding count. DB-only project discovery uses a growable list rather than repeatedly copying an array. A one-time metadata query checks which `ComponentTruss` columns exist. Absent mapped columns are omitted from SQL and shown as not compared, never as matches (candidate mappings remain unresolved); unavailable metadata stops the run with an explicit error. Queries select only identity, checksum, version and available mapped columns (including unresolved candidates); unused large columns such as `JigData` and `CarriedTrusses` are not fetched. `-ProjectId` and `-Limit` are applied before truss batches are loaded, including the DB-only path. No timing instrumentation is added.
 
 ## Contract
 
@@ -70,6 +70,8 @@ This is a coverage expansion, not a complete cross-table mapping. The full contr
 | Units and nulls | `*Inches` geometry values are in inches; pitch values are rise per 12; missing values are never matches — a missing field, an absent DB column, a database NULL, a file NULL and a missing side are distinguished; a both-null pair (both present, both NULL) is unknown, not true, and distinct from both sides being absent |
 
 ### Mapped pairs
+
+Basis `persistence mapping Nov 5, 2026` refers to *Director ↔ Studio Field-Level Persistence Mapping*, pages 8–11 (code revisions listed in that document). These six fields are compared, not unresolved candidates. Weight and IsSymmetric are selected from `ComponentHeader`, Quantity from `Component`, and the remaining mapped values from `ComponentTruss`. `contract.json` records the source table per field. Live VM schema verification is still pending.
 
 Basis `observed I-4028` means the pair matches a saved I-4028 file and DB evidence; the mapping is observed, not derived from authoritative producer code. Basis `candidate` is unresolved: names/meaning are not confirmed, both side values are retained and the pair is never flagged as a mismatch. Additional flags not in the map are not fetched or included in output, and are never auto-confirmed from the same name.
 
@@ -117,11 +119,12 @@ Basis `observed I-4028` means the pair matches a saved I-4028 file and DB eviden
 | TCRakeLast | TCRakeLast | Geometry | numeric | observed I-4028 |
 | CompatibilityVersion | CompatibilityVersion | Version | text | observed I-4028 |
 | TrussMatchCode | TrussMatchCode | Geometry | text | observed I-4028 |
-| Span | TrussSpanInches | Geometry | numeric | candidate |
-| ProdSpan | FullSpanInches | Geometry | numeric | candidate |
-| IsStructural | IsStructuralGable | Flags | boolean | candidate |
-| Weight | WeightPounds | Geometry | numeric | candidate |
-| PlyToPlyNote | PlyToPly | Geometry | text | candidate |
+| Span | ComponentTruss.TrussSpanInches | Geometry | numeric | persistence mapping Nov 5, 2026 |
+| ProdSpan | ComponentTruss.FullSpanInches | Geometry | numeric | persistence mapping Nov 5, 2026 |
+| IsStructural | ComponentTruss.IsStructuralGable | Flags | boolean | persistence mapping Nov 5, 2026 |
+| Weight | ComponentHeader.WeightPounds | Geometry | numeric | persistence mapping Nov 5, 2026 |
+| PlyToPlyNote | ComponentTruss.PlyToPly | Geometry | text | persistence mapping Nov 5, 2026 |
+| IsSymmetric | ComponentHeader.IsSymmetrical | Flags | boolean | persistence mapping Nov 5, 2026 |
 
 Identity and integrity checks that are not rows of the map: truss membership from `Trusses/<name>.tdlTruss` against `ComponentHeader.Name` (membership is a set; pairings are not compared, and JSON never defines membership), `.tdlTruss` MD5 vs `TrussFileCheckSum` (independent of JSON), JSON `Version` vs `AnalysisVersion` (only when the JSON exists). `Project.FilesCheckInId` vs the archive timestamp is compared only on Server mode; on Client mode it is informational-only within the contract.
 
