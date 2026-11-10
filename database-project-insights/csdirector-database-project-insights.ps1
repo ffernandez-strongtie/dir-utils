@@ -594,7 +594,7 @@ function WriteProject($o,$number){
  WriteText (Join-Path $dir 'findings.json') (ToJson $flat.ToArray() 4)
  $blobRows=[Collections.Generic.List[object]]::new()
  $tn=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
- foreach($t in $o.trusses){
+ foreach($t in ($o.trusses | Sort-Object @{Expression={if($_.findings.Count -gt 0){0}else{1}}},@{Expression={$_.name}})){
   $tf=[Collections.Generic.List[object]]::new()
   $fl=[Collections.Generic.List[object]]::new()
   foreach($f in $t.findings){
@@ -609,8 +609,7 @@ function WriteProject($o,$number){
   $ver=if($t.version){$t.version}else{@{}}
   $blobRows.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage,$t.inventory))
  }
- $sorted=@($blobRows | Sort-Object @{Expression={if($_[2].Count -gt 0){0}else{1}}},@{Expression={$_[0]}})
- $blob=if($sorted.Count -gt 0){(ToJson $sorted 50 -compress).Replace('</','<\/')}else{'[]'}
+ $blob=if($blobRows.Count -gt 0){(ToJson $blobRows.ToArray() 50 -compress).Replace('</','<\/')}else{'[]'}
  $cc=[ordered]@{}
  foreach($f in $o.findings){$nm=$Rules[$f.rule][0];if($cc.Contains($nm)){$cc[$nm]++}else{$cc[$nm]=1}}
  $o.cats=$cc
