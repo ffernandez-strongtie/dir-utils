@@ -24,7 +24,8 @@ param(
  [string[]]$ProjectId,
  [ValidatePattern('^\d+(\.\d+){0,3}$')][string]$LegacyCutoffVersion='2024.7.2.7',
  [ValidateRange(0,2147483647)][int]$Limit=0,
- [switch]$IncludeDbOnly
+ [switch]$IncludeDbOnly,
+ [switch]$IncludeTrussJson
 )
 $ErrorActionPreference='Stop'
 Write-Host ''
@@ -598,7 +599,8 @@ function WriteProject($o,$number){
  while(-not $used.Add($folder)){$folder=(SafeName $number)+'_'+$n;$n++}
  $o.folder=$folder
  $dir=Join-Path $outDir ('projects\'+$folder)
- [void](New-Item -ItemType Directory -Path (Join-Path $dir 'trusses') -Force)
+ [void](New-Item -ItemType Directory -Path $dir -Force)
+ if($IncludeTrussJson){[void](New-Item -ItemType Directory -Path (Join-Path $dir 'trusses') -Force)}
  $byRule=[ordered]@{};$bySev=[ordered]@{}
  foreach($f in $o.findings){
   if($byRule.Contains($f.rule)){$byRule[$f.rule]++}else{$byRule[$f.rule]=1}
@@ -622,10 +624,12 @@ function WriteProject($o,$number){
    $tf.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
    $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
   }
-  $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();inventory=$t.inventory.ToArray();coverage=$t.coverage}
-  $tfile=SafeName $t.name;$k=2
-  while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
-  WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
+  if($IncludeTrussJson){
+   $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();inventory=$t.inventory.ToArray();coverage=$t.coverage}
+   $tfile=SafeName $t.name;$k=2
+   while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
+   WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
+  }
   $cellArr=[string[]]@($Groups | ForEach-Object {$t.cells[$_]})
   $ver=if($t.version){$t.version}else{@{}}
   $blobRows.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage,$t.inventory))

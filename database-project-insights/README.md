@@ -21,6 +21,7 @@ Without `-SqlUser` it uses Windows authentication. The password is only read fro
 | `-Limit` | 0 (all) | Stop after N projects |
 | `-Client` | off | Inspect the Client database instead of the Server one. Defaults become `C:\SST\Client\Projects` and `CSDatabaseClient`. A project folder with an expanded `Trusses` folder is read directly; otherwise its `.CSDProj` is used. The report and every project page are labelled CLIENT or SERVER |
 | `-IncludeDbOnly` | off | Also write pages for DB projects with no archive folder (DB values only, "DB only" tab). Omitted by default |
+| `-IncludeTrussJson` | off | Also write `projects/<number>/trusses/<truss>.json`. HTML detail and project-level JSON are always included |
 | `-LegacyCutoffVersion` | `2024.7.2.7` | Truss versions strictly lower are before 2024.r7 (DB was the source of truth) |
 
 The latest archive per project folder is used. Projects with no archive are not listed.
@@ -29,7 +30,8 @@ The latest archive per project folder is used. Projects with no archive are not 
 
 - `index.html`: one row per project with state, verdict, top causes and truss count; tabs and issue filters; aggregate coverage totals and a link to the contract manifest.
 - `projects/<number>/project.html`: one row per truss with a symbol matrix; click a row for the field-by-field table, per-truss coverage (compared / different / not compared), and the unmapped field inventory.
-- `projects/<number>/summary.json`, `findings.json`, `trusses/<truss>.json`: machine-readable detail. `trusses/<truss>.json` also carries the per-truss coverage counts, the unmapped field inventory and the explicit comparison status of every mapped field (each with its comparison policy and basis; candidate rows are never flagged).
+- `projects/<number>/summary.json`, `findings.json`: always included machine-readable project detail.
+- `projects/<number>/trusses/<truss>.json`: optional, written only with `-IncludeTrussJson`; carries the per-truss coverage counts, the unmapped field inventory and the explicit comparison status of every mapped field (each with its comparison policy and basis; candidate rows are never flagged).
 - `contract.json`: a manifest generated from the same map metadata as the comparison — every mapped pair with group, comparison policy and evidence basis, plus candidates, pending nested/structured encodings and pending lookup identities.
 - `rules.json`: rule id to plain name and description.
 
