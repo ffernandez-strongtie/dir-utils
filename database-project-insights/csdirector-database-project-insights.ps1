@@ -425,6 +425,15 @@ function FillDbOnlyFields($row,$r){
  }
  $row.coverage=[ordered]@{compared=0;different=0;notCompared=$row.fields.Count}
 }
+function CompactDbOnlyRow($name,$r){
+ $values=[Collections.Generic.List[object]]::new()
+ foreach($fld in $Map.Keys){
+  $col=$Map[$fld]
+  if($r.Contains($col)){$values.Add($r[$col])}else{$values.Add($null)}
+ }
+ $checksumStatus=if(-not $r.Contains('TrussFileCheckSum')){'missing DB column / not compared'}elseif($null -eq $r['TrussFileCheckSum']){'both null / not compared'}else{'file NULL / not compared'}
+ return ,([object[]]@($name,$r['AnalysisVersion'],$r['CompatibilityVersion'],$r['TrussFileCheckSum'],$checksumStatus,$values.ToArray()))
+}
 function AnalyzeProject($number,$archivePath,$cut){
  $isDir=Test-Path -LiteralPath $archivePath -PathType Container
  $tsName=[IO.Path]::GetFileName($archivePath)
@@ -585,11 +594,12 @@ $ProjectTemplate=@'
 <p><input type=text id=q placeholder="filter truss name"> <label><input type=checkbox id=onlyBad checked> only trusses with findings</label> <span id=cnt></span></p>
 <table style="table-layout:fixed"><thead><tr><th>Truss</th>@@HEADERS@@<th class=cell style="width:220px">Version (file / DB)</th></tr></thead><tbody id=tb></tbody></table>@@LEGEND@@</main>
 <script>
-const G=@@GROUPS@@,D=@@DATA@@,CL={ok:'c-ok',bad:'c-bad',stale:'c-stale',pre:'c-pre',na:'c-na'},SY={ok:'&#10003;',bad:'&#8800;',stale:'&#8635;',pre:'&#9208;',na:'&#8709;'},open_=new Set(),all_=new Set();
+const G=@@GROUPS@@,D=@@DATA@@,DB=@@DBONLY@@,M=@@DBMETA@@,NA=G.map(()=> 'na'),CL={ok:'c-ok',bad:'c-bad',stale:'c-stale',pre:'c-pre',na:'c-na'},SY={ok:'&#10003;',bad:'&#8800;',stale:'&#8635;',pre:'&#9208;',na:'&#8709;'},open_=new Set(),all_=new Set();
 let rules=new Set();
 function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function fv(x){return x==null?'-':(typeof x==='object'?esc(JSON.stringify(x)):esc(x))}
-function det(i){const r=D[i],F=r[4]||[],CV=r[5]||{};let h='<tr><td colspan='+(G.length+1)+' style="background:#fafbfc">';
+function dbRow(r){const F=[{field:'Version',group:'Version',column:'AnalysisVersion',db:r[1],file:null,match:null,status:'missing side / not compared'},{field:'TdlTrussMD5',group:'Identity',column:'TrussFileCheckSum',db:r[3],file:null,match:null,status:r[4]}];M.forEach((m,i)=>F.push({field:m[0],group:m[1],column:m[2],db:r[5][i],file:null,match:null,status:m[3]==='candidate'?'unresolved':'missing side / not compared',basis:m[3],policy:m[4]}));return [r[0],NA,[],{file:null,db:r[1],compat_file:null,compat_db:r[2]},F,{compared:0,different:0,notCompared:M.length+2}]}
+function det(i){const r=DB?dbRow(D[i]):D[i],F=r[4]||[],CV=r[5]||{};let h='<tr><td colspan='+(G.length+1)+' style="background:#fafbfc">';
 if(CV.compared!==undefined)h+='<p>Coverage: '+CV.compared+' compared, '+CV.different+' different, '+CV.notCompared+' not compared</p>';
 if(r[2].length)h+='<p class=note>'+r[2].map(f=>'<b>'+f[6]+'</b>: '+f[0]+' - '+esc(f[5])+(f[4]=='stale'?' (stale DB)':'')).filter((v,k,a)=>a.indexOf(v)==k).join('<br>')+'</p>';
 const bad=F.filter(f=>f.match===false),rest=F.filter(f=>f.match!==false);
@@ -601,13 +611,13 @@ if(rest.length&&bad.length)h+='<a href="#" onclick="all_.has('+i+')?all_.delete(
 else h+='<p>No values recorded.</p>';
 return h+'</td></tr>'}
 function draw(){const q=document.getElementById('q').value.toLowerCase(),ob=document.getElementById('onlyBad').checked;let n=0,h='';
-D.forEach((r,i)=>{if(ob&&!r[2].length)return;if(q&&r[0].toLowerCase().indexOf(q)<0)return;if(rules.size&&!r[2].some(f=>rules.has(f[0])))return;n++;if(n>400)return;
-const v=r[3];h+='<tr style="cursor:pointer" onclick="tg('+i+')"><td>'+(open_.has(i)?'&#9662; ':'&#9656; ')+esc(r[0])+'</td>'+r[1].map((c,k)=>G[k]=='Version'?'':'<td class="cell '+CL[c]+'">'+SY[c]+'</td>').join('')+'<td class="cell '+CL[r[1][1]]+'">'+SY[r[1][1]]+(v.file||v.db?' '+esc(v.file||'-')+' / '+esc(v.db||'-'):'')+'</td></tr>'+(open_.has(i)?det(i):'')});
+D.forEach((r,i)=>{const findings=DB?[]:r[2],cells=DB?NA:r[1],v=DB?{file:null,db:r[1]}:r[3];if(ob&&!findings.length)return;if(q&&r[0].toLowerCase().indexOf(q)<0)return;if(rules.size&&!findings.some(f=>rules.has(f[0])))return;n++;if(n>400)return;
+h+='<tr style="cursor:pointer" onclick="tg('+i+')"><td>'+(open_.has(i)?'&#9662; ':'&#9656; ')+esc(r[0])+'</td>'+cells.map((c,k)=>G[k]=='Version'?'':'<td class="cell '+CL[c]+'">'+SY[c]+'</td>').join('')+'<td class="cell '+CL[cells[1]]+'">'+SY[cells[1]]+(v.file||v.db?' '+esc(v.file||'-')+' / '+esc(v.db||'-'):'')+'</td></tr>'+(open_.has(i)?det(i):'')});
 document.getElementById('tb').innerHTML=h;document.getElementById('cnt').textContent=n+' trusses'+(n>400?' (first 400 shown)':'')}
 function tg(i){open_.has(i)?open_.delete(i):open_.add(i);draw()}
 document.getElementById('q').oninput=draw;document.getElementById('onlyBad').onchange=draw;
 document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{const r=c.dataset.r;rules.has(r)?rules.delete(r):rules.add(r);c.classList.toggle('on');draw()});
-if(!D.some(r=>r[2].length))document.getElementById('onlyBad').checked=false;
+if(DB||!D.some(r=>r[2].length))document.getElementById('onlyBad').checked=false;
 draw();
 </script>
 '@
@@ -712,7 +722,13 @@ function WriteProject($o,$number){
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
  $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'+' | coverage '+$cov.compared+' compared, '+$cov.different+' different, '+$cov.notCompared+' not compared | <a href="../../contract.json">contract.json</a>'
- $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@LEGEND@@',(CauseLegend)).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress))
+ if($o.dbOnly -and -not $script:DbOnlyMetaJson){
+  $dbMeta=[Collections.Generic.List[object]]::new()
+  foreach($fld in $Map.Keys){$m=$MapMeta[$fld];$dbMeta.Add([object[]]@($fld,$m.group,$Map[$fld],$m.basis,$m.policy))}
+  $script:DbOnlyMetaJson=ToJson $dbMeta.ToArray() 4 -compress
+ }
+ $dbMetaJson=if($o.dbOnly){$script:DbOnlyMetaJson}else{'[]'}
+ $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@LEGEND@@',(CauseLegend)).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DBONLY@@',$(if($o.dbOnly){'true'}else{'false'})).Replace('@@DBMETA@@',$dbMetaJson)
  $split=$page.IndexOf('@@DATA@@',[StringComparison]::Ordinal)
  if($split -lt 0){throw 'Project template has no data marker.'}
  $tn=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -731,24 +747,33 @@ function WriteProject($o,$number){
   $chunk=[Collections.Generic.List[object]]::new()
   foreach($item in $trussItems){
    if($o.dbOnly){
-    $t=[ordered]@{name=$item;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
-    FillDbOnlyFields $t $dbt[$item][0]
+     $dbRow=$dbt[$item][0]
+     if($IncludeTrussJson){
+      $t=[ordered]@{name=$item;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
+      FillDbOnlyFields $t $dbRow
+     }else{$t=$null}
    }else{$t=$item}
-   $tf=[Collections.Generic.List[object]]::new()
-   $fl=[Collections.Generic.List[object]]::new()
-   foreach($f in $t.findings){
-    $tf.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
-    $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
+    if($null -ne $t){
+     $tf=[Collections.Generic.List[object]]::new()
+     $fl=[Collections.Generic.List[object]]::new()
+     foreach($f in $t.findings){
+      $tf.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
+      $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
+     }
+     if($IncludeTrussJson){
+      $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();coverage=$t.coverage}
+      $tfile=SafeName $t.name;$k=2
+      while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
+      WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
+     }
    }
-   if($IncludeTrussJson){
-    $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();coverage=$t.coverage}
-    $tfile=SafeName $t.name;$k=2
-    while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
-    WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
-   }
-   $cellArr=[string[]]@($Groups | ForEach-Object {$t.cells[$_]})
-   $ver=if($t.version){$t.version}else{@{}}
-   $chunk.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage))
+    if($o.dbOnly){
+     $chunk.Add((CompactDbOnlyRow $item $dbRow))
+    }else{
+     $cellArr=[string[]]@($Groups | ForEach-Object {$t.cells[$_]})
+     $ver=if($t.version){$t.version}else{@{}}
+     $chunk.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage))
+    }
    if($chunk.Count -ge 128){$written=FlushProjectRows $writer $chunk $written}
   }
   $written=FlushProjectRows $writer $chunk $written
@@ -791,7 +816,7 @@ foreach($w in $work){
   if($TimingLog){$batchTimer.Stop();LogTiming 'batch' $batchTimer.Elapsed.TotalMilliseconds ($batchEnd-$i+1)}
  }
  $i++
- if($i -eq 1 -or $i -eq $work.Count -or $progressTimer.ElapsedMilliseconds -ge 1000){
+ if($i -eq 1 -or $i -eq $work.Count -or $progressTimer.ElapsedMilliseconds -ge 10000){
   if($TimingLog){$progressCallTimer=[Diagnostics.Stopwatch]::StartNew()}
   Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
   if($TimingLog){$progressCallTimer.Stop();LogTiming 'progress' $progressCallTimer.Elapsed.TotalMilliseconds}
@@ -854,7 +879,7 @@ if($IncludeDbOnly){
    Write-Verbose ('DB-only batch: {0} projects loaded in {1:N2}s' -f ($batchEnd-$k+1),$batchWatch.Elapsed.TotalSeconds)
   }
   $k++
-  if($k -eq 1 -or $k -eq $dbOnly.Count -or $dbProgressTimer.ElapsedMilliseconds -ge 1000){
+  if($k -eq 1 -or $k -eq $dbOnly.Count -or $dbProgressTimer.ElapsedMilliseconds -ge 10000){
    if($TimingLog){$progressCallTimer=[Diagnostics.Stopwatch]::StartNew()}
    Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
    if($TimingLog){$progressCallTimer.Stop();LogTiming 'progress' $progressCallTimer.Elapsed.TotalMilliseconds}
