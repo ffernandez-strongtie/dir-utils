@@ -356,12 +356,30 @@ function AnalyzeDbOnly($number,$ci){
  $dbt=DbTrusses $number
  foreach($name in ($dbt.Keys | Sort-Object)){
   $row=[ordered]@{name=$name;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
-  FillFields $row $null $dbt[$name][0] $null $out.findings $false $null
+  FillDbOnlyFields $row $dbt[$name][0]
   $out.trusses.Add($row)
  }
  $out.counts=[ordered]@{trusses=$out.trusses.Count;findings=0;bad=0;stale=0;pre=0}
  $out.staleProject=$false
  return ,$out
+}
+function FillDbOnlyFields($row,$r){
+ # With no archive side, mapped values cannot be compared. Keep every field and
+ # status in the report without running the per-field comparison functions.
+ $dv=$r['AnalysisVersion'];$dc=$r['CompatibilityVersion']
+ $row.version=[ordered]@{file=$null;db=$dv;compat_file=$null;compat_db=$dc}
+ $row.fields.Add([ordered]@{field='Version';group='Version';column='AnalysisVersion';db=$dv;file=$null;match=$null;status='missing side / not compared'})
+ $dk=$r['TrussFileCheckSum']
+ $cs=[ordered]@{exists=$false;isNull=$true;value=$null;whole=$false}
+ $cst=FieldStatus $cs (DbSide $r 'TrussFileCheckSum') $false
+ $row.fields.Add([ordered]@{field='TdlTrussMD5';group='Identity';column='TrussFileCheckSum';db=$dk;file=$null;match=$null;status=$cst})
+ foreach($fld in $Map.Keys){
+  $meta=$MapMeta[$fld];$col=$Map[$fld]
+  $dbv=$null;if($r.Contains($col)){$dbv=$r[$col]}
+  $status=if($meta.basis -eq 'candidate'){'unresolved'}else{'missing side / not compared'}
+  $row.fields.Add([ordered]@{field=$fld;group=$meta.group;column=$col;db=$dbv;file=$null;match=$null;status=$status;basis=$meta.basis;policy=$meta.policy})
+ }
+ $row.coverage=[ordered]@{compared=0;different=0;notCompared=$row.fields.Count}
 }
 function AnalyzeProject($number,$archivePath,$cut){
  $isDir=Test-Path -LiteralPath $archivePath -PathType Container
@@ -669,17 +687,27 @@ foreach($w in $work){
 if($IncludeDbOnly){
  $have=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
  foreach($d in (Get-ChildItem -LiteralPath $root -Directory)){[void]$have.Add($d.Name)}
- $dbp=Q 'SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p ORDER BY p.ProjectNumber' @{}
  $dbOnly=[Collections.Generic.List[object]]::new()
- foreach($r in $dbp.Rows){
-  $pn=[string]$r['ProjectNumber']
-  if($have.Contains($pn)){continue}
-  if($ProjectId -and ($ProjectId -notcontains $pn)){continue}
-  $dbOnly.Add(@($pn,$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']})))
+ $dbCommand=$script:Conn.CreateCommand()
+ $dbCommand.CommandText='SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p ORDER BY p.ProjectNumber'
+ $dbCommand.CommandTimeout=120
+ $dbReader=$null;$stoppedEarly=$false
+ try{
+  $dbReader=$dbCommand.ExecuteReader()
+  while($dbReader.Read()){
+   $pn=[string]$dbReader.GetValue(0)
+   if($have.Contains($pn)){continue}
+   if($ProjectId -and ($ProjectId -notcontains $pn)){continue}
+   $ci=if($dbReader.IsDBNull(1)){$null}else{[string]$dbReader.GetValue(1)}
+   $dbOnly.Add(@($pn,$ci))
+   if($Limit -gt 0 -and $dbOnly.Count -ge $Limit){$stoppedEarly=$true;break}
+  }
+ }finally{
+  if($stoppedEarly){$dbCommand.Cancel()}
+  if($dbReader){$dbReader.Dispose()}
+  $dbCommand.Dispose()
  }
- if($Limit -gt 0){$dbOnly=@($dbOnly | Select-Object -First $Limit)}
  Write-Host ('DB-only projects: '+$dbOnly.Count)
- $dbp=$null
  $k=0;$batchEnd=-1
  foreach($w in $dbOnly){
   if($k -gt $batchEnd){$batchEnd=DbBatchEnd $dbOnly $k;LoadDbBatch @($dbOnly[$k..$batchEnd] | ForEach-Object {$_[0]})}
