@@ -1,13 +1,15 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
 Read-only comparison of CSDirector database trusses with the TrussStudio files inside .csdproj archives. Produces a summary index, one page per project and JSON for each project and truss.
 .EXAMPLE
-.\csdirector-database-project-insights.ps1 -SqlUser insights_ro -Server 192.168.71.183 -ProjectsRoot C:\temp\csdproj-samples
+.\csdirector-database-project-insights.ps1 -SqlUser '<sql-user>' -Server '<server-or-instance>' -ProjectsRoot 'C:\path\to\projects'
 .EXAMPLE
-.\csdirector-database-project-insights.ps1 -ProjectId S-789,I-4028
+.\csdirector-database-project-insights.ps1 -ProjectId 'PROJECT-001','PROJECT-002'
 .EXAMPLE
 .\csdirector-database-project-insights.ps1 -Limit 5
+.EXAMPLE
+.\csdirector-database-project-insights.ps1 -IncludeDbOnly -TimingLog -Limit 100
 .NOTES
 With -SqlUser the password is read only from the CSD_SQL_PASSWORD environment variable. Archives and SQL records are never changed.
 Projects whose trusses are all older than -LegacyCutoffVersion (pre 2024.r7) are DB-only and are not counted as inconsistent.
@@ -25,7 +27,8 @@ param(
  [ValidatePattern('^\d+(\.\d+){0,3}$')][string]$LegacyCutoffVersion='2024.7.2.7',
  [ValidateRange(0,2147483647)][int]$Limit=0,
  [switch]$IncludeDbOnly,
- [switch]$IncludeTrussJson
+ [switch]$IncludeTrussJson,
+ [switch]$TimingLog
 )
 $ErrorActionPreference='Stop'
 Write-Host ''
@@ -59,54 +62,54 @@ $Map=[ordered]@{
  'Span'='TrussSpanInches';'ProdSpan'='FullSpanInches';'IsStructural'='IsStructuralGable';'Weight'='WeightPounds';'PlyToPlyNote'='PlyToPly';'IsSymmetric'='IsSymmetrical'
 }
 $MapMeta=[ordered]@{
- 'Quantity'=[ordered]@{group='Identity';policy='int';basis='observed I-4028'}
- 'NumPlies'=[ordered]@{group='Geometry';policy='int';basis='observed I-4028'}
- 'Thickness'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'OverallTrussHeight'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'LeftOverhang'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightOverhang'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'LeftCantilever'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightCantilever'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'LeftHeelHeight'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightHeelHeight'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'PitchLeftTopOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed I-4028'}
- 'PitchRightTopOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed I-4028'}
- 'PitchLeftBottomOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed I-4028'}
- 'PitchRightBottomOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed I-4028'}
- 'IsAttic'=[ordered]@{group='Flags';policy='bool';basis='observed I-4028'}
- 'IsGable'=[ordered]@{group='Flags';policy='bool';basis='observed I-4028'}
- 'IsGirder'=[ordered]@{group='Flags';policy='bool';basis='observed I-4028'}
- 'IsFlipped'=[ordered]@{group='Flags';policy='bool';basis='observed I-4028'}
- 'OCSpacing'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'Height'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'LeftHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'LeftTopChordHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightTopChordHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'LeftStub'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightStub'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'TCPitchCount'=[ordered]@{group='Pitch';policy='int';basis='observed I-4028'}
- 'BCPitchCount'=[ordered]@{group='Pitch';policy='int';basis='observed I-4028'}
- 'Camber'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'CamberDistance'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'CamberNote'=[ordered]@{group='Geometry';policy='text';basis='observed I-4028'}
- 'BearingPadNotes'=[ordered]@{group='Geometry';policy='text';basis='observed I-4028'}
- 'LeftOverhangRake'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'RightOverhangRake'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'SinglePlyOverhang'=[ordered]@{group='Flags';policy='bool';basis='observed I-4028'}
- 'SinglePlyFill'=[ordered]@{group='Flags';policy='bool';basis='observed I-4028'}
- 'FillPly'=[ordered]@{group='Geometry';policy='int';basis='observed I-4028'}
- 'OverhangPly'=[ordered]@{group='Geometry';policy='int';basis='observed I-4028'}
- 'TCRakeFirst'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'TCRakeLast'=[ordered]@{group='Geometry';policy='numeric';basis='observed I-4028'}
- 'CompatibilityVersion'=[ordered]@{group='Version';policy='text';basis='observed I-4028'}
- 'TrussMatchCode'=[ordered]@{group='Geometry';policy='text';basis='observed I-4028'}
- 'Span'=[ordered]@{group='Geometry';policy='numeric';basis='persistence mapping Nov 5, 2026'}
- 'ProdSpan'=[ordered]@{group='Geometry';policy='numeric';basis='persistence mapping Nov 5, 2026'}
- 'IsStructural'=[ordered]@{group='Flags';policy='bool';basis='persistence mapping Nov 5, 2026'}
- 'Weight'=[ordered]@{group='Geometry';policy='numeric';basis='persistence mapping Nov 5, 2026'}
- 'PlyToPlyNote'=[ordered]@{group='Geometry';policy='text';basis='persistence mapping Nov 5, 2026'}
- 'IsSymmetric'=[ordered]@{group='Flags';policy='bool';basis='persistence mapping Nov 5, 2026'}
+ 'Quantity'=[ordered]@{group='Identity';policy='int';basis='observed mapping'}
+ 'NumPlies'=[ordered]@{group='Geometry';policy='int';basis='observed mapping'}
+ 'Thickness'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'OverallTrussHeight'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'LeftOverhang'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightOverhang'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'LeftCantilever'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightCantilever'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'LeftHeelHeight'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightHeelHeight'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'PitchLeftTopOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed mapping'}
+ 'PitchRightTopOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed mapping'}
+ 'PitchLeftBottomOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed mapping'}
+ 'PitchRightBottomOver12'=[ordered]@{group='Pitch';policy='numeric';basis='observed mapping'}
+ 'IsAttic'=[ordered]@{group='Flags';policy='bool';basis='observed mapping'}
+ 'IsGable'=[ordered]@{group='Flags';policy='bool';basis='observed mapping'}
+ 'IsGirder'=[ordered]@{group='Flags';policy='bool';basis='observed mapping'}
+ 'IsFlipped'=[ordered]@{group='Flags';policy='bool';basis='observed mapping'}
+ 'OCSpacing'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'Height'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'LeftHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'LeftTopChordHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightTopChordHeelToPeak'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'LeftStub'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightStub'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'TCPitchCount'=[ordered]@{group='Pitch';policy='int';basis='observed mapping'}
+ 'BCPitchCount'=[ordered]@{group='Pitch';policy='int';basis='observed mapping'}
+ 'Camber'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'CamberDistance'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'CamberNote'=[ordered]@{group='Geometry';policy='text';basis='observed mapping'}
+ 'BearingPadNotes'=[ordered]@{group='Geometry';policy='text';basis='observed mapping'}
+ 'LeftOverhangRake'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'RightOverhangRake'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'SinglePlyOverhang'=[ordered]@{group='Flags';policy='bool';basis='observed mapping'}
+ 'SinglePlyFill'=[ordered]@{group='Flags';policy='bool';basis='observed mapping'}
+ 'FillPly'=[ordered]@{group='Geometry';policy='int';basis='observed mapping'}
+ 'OverhangPly'=[ordered]@{group='Geometry';policy='int';basis='observed mapping'}
+ 'TCRakeFirst'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'TCRakeLast'=[ordered]@{group='Geometry';policy='numeric';basis='observed mapping'}
+ 'CompatibilityVersion'=[ordered]@{group='Version';policy='text';basis='observed mapping'}
+ 'TrussMatchCode'=[ordered]@{group='Geometry';policy='text';basis='observed mapping'}
+ 'Span'=[ordered]@{group='Geometry';policy='numeric';basis='documented persistence mapping'}
+ 'ProdSpan'=[ordered]@{group='Geometry';policy='numeric';basis='documented persistence mapping'}
+ 'IsStructural'=[ordered]@{group='Flags';policy='bool';basis='documented persistence mapping'}
+ 'Weight'=[ordered]@{group='Geometry';policy='numeric';basis='documented persistence mapping'}
+ 'PlyToPlyNote'=[ordered]@{group='Geometry';policy='text';basis='documented persistence mapping'}
+ 'IsSymmetric'=[ordered]@{group='Flags';policy='bool';basis='documented persistence mapping'}
 }
 $Rules=[ordered]@{
  'R-PROJ'=@('Project not in DB','Archive exists but no Project row with this number in the DB.')
@@ -142,13 +145,47 @@ function WriteText($path,$text){[IO.File]::WriteAllText($path,$text,[Text.UTF8En
 function ToJson($o,[int]$depth=8,[switch]$compress){
  if($compress){ConvertTo-Json -InputObject $o -Depth $depth -Compress}else{ConvertTo-Json -InputObject $o -Depth $depth}
 }
+function LogTiming([string]$phase,[double]$durationMs=0,[long]$rows=0,[long]$trusses=0,[double]$serializeMs=0,[double]$writeMs=0,[long]$htmlBytes=0){
+ if(-not $TimingLog){return}
+ $inv=[Globalization.CultureInfo]::InvariantCulture
+ $proc=[Diagnostics.Process]::GetCurrentProcess()
+ try{
+  $proc.Refresh()
+  $values=@(
+   [DateTime]::UtcNow.ToString('o',$inv),
+   $script:TimingStart.Elapsed.TotalMilliseconds.ToString('F1',$inv),
+   $phase,
+   [string]$script:DiagnosticProjectIndex,
+   [string]$script:DiagnosticKind,
+   [string]$rows,
+   [string]$trusses,
+   $durationMs.ToString('F1',$inv),
+   $serializeMs.ToString('F1',$inv),
+   $writeMs.ToString('F1',$inv),
+   [string]$htmlBytes,
+   ([GC]::GetTotalMemory($false)/1MB).ToString('F1',$inv),
+   ($proc.WorkingSet64/1MB).ToString('F1',$inv),
+   ($proc.PrivateMemorySize64/1MB).ToString('F1',$inv),
+   $proc.TotalProcessorTime.TotalMilliseconds.ToString('F1',$inv),
+   [string][GC]::CollectionCount(0),
+   [string][GC]::CollectionCount(1),
+   [string][GC]::CollectionCount(2)
+  )
+  [IO.File]::AppendAllText($script:TimingPath,($values -join ',')+"`r`n",[Text.UTF8Encoding]::new($false))
+ }finally{$proc.Dispose()}
+}
 function Cells($v){$c=[ordered]@{};foreach($g in $Groups){$c[$g]=$v};$c}
 function IdentityOnly($state){$c=Cells 'na';$c['Identity']=$state;$c}
-function Q($sql,$params){
+function Q($sql,$params,[string]$phase='sql_query'){
  $cmd=$script:Conn.CreateCommand();$cmd.CommandText=$sql;$cmd.CommandTimeout=120
  foreach($k in $params.Keys){[void]$cmd.Parameters.AddWithValue('@'+$k,$params[$k])}
  $dt=[Data.DataTable]::new()
- [void][Data.SqlClient.SqlDataAdapter]::new($cmd).Fill($dt)
+ $adapter=[Data.SqlClient.SqlDataAdapter]::new($cmd)
+ try{
+  if($TimingLog){LogTiming ($phase+'_start');$timer=[Diagnostics.Stopwatch]::StartNew()}
+  [void]$adapter.Fill($dt)
+  if($TimingLog){$timer.Stop();LogTiming $phase $timer.Elapsed.TotalMilliseconds $dt.Rows.Count}
+ }finally{$adapter.Dispose();$cmd.Dispose()}
  return ,$dt
 }
 function AddF($row,$All,$stale,$rule,$field,$dbv,$filev,$msg,$grp,$sev='error'){
@@ -252,7 +289,7 @@ function DbBatchEnd($items,[int]$start){
   $key='p'+$names.Count;$params[$key]=$number;$names.Add('@'+$key)
  }
  if($names.Count -gt 0){
-  $dt=Q ('SELECT p.ProjectNumber,COUNT_BIG(*) AS TrussCount FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+($names -join ',')+') GROUP BY p.ProjectNumber') $params
+  $dt=Q ('SELECT p.ProjectNumber,COUNT_BIG(*) AS TrussCount FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+($names -join ',')+') GROUP BY p.ProjectNumber') $params 'sql_count'
   foreach($r in $dt.Rows){$script:DbCountCache[[string]$r['ProjectNumber']]=[long]$r['TrussCount']}
  }
  $total=0L;$end=$start
@@ -275,20 +312,21 @@ function LoadDbBatch([string[]]$numbers){
  if(-not $numbers.Count){return}
  $params=@{};$placeholders=for($i=0;$i -lt $numbers.Count;$i++){$params['p'+$i]=$numbers[$i];'@p'+$i}
  $filter=$placeholders -join ','
- $projects=Q ('SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p WHERE p.ProjectNumber IN ('+$filter+')') $params
+ $projects=Q ('SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p WHERE p.ProjectNumber IN ('+$filter+')') $params 'sql_projects'
  foreach($r in $projects.Rows){
   $number=[string]$r['ProjectNumber']
   $script:ProjectBatch[$number]=$(if($r['FilesCheckInId'] -is [DBNull]){$null}else{[string]$r['FilesCheckInId']})
  }
  if($null -eq $script:TrussColumns){
-  $schema=Q "SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.ComponentTruss')" @{}
+  $schema=Q "SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.ComponentTruss')" @{} 'sql_schema'
   if(-not $schema.Rows.Count){throw 'Cannot read dbo.ComponentTruss column metadata; comparison cannot safely continue.'}
   $script:TrussColumns=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
   foreach($column in $schema.Rows){[void]$script:TrussColumns.Add([string]$column['name'])}
  }
  $columns=@('AnalysisVersion','CompatibilityVersion')+@($Map.Values | Where-Object {$_ -notin @('ComponentQuantity','WeightPounds','IsSymmetrical')})
  $select=(@($columns | Sort-Object -Unique | Where-Object {$script:TrussColumns.Contains($_)} | ForEach-Object {',t.['+$_.Replace(']',']]')+']'}) -join '')
- $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,h.WeightPounds,h.IsSymmetrical,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params
+ $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,h.WeightPounds,h.IsSymmetrical,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params 'sql_trusses'
+ if($TimingLog){LogTiming 'db_materialize_start' 0 $dt.Rows.Count;$materializeTimer=[Diagnostics.Stopwatch]::StartNew()}
  foreach($r in $dt.Rows){
   $number=[string]$r['ProjectNumber']
   if(-not $script:TrussBatch.ContainsKey($number)){$script:TrussBatch[$number]=[Collections.Generic.Dictionary[string,object]]::new()}
@@ -305,6 +343,7 @@ function LoadDbBatch([string[]]$numbers){
   if(-not $d.ContainsKey($n)){$d[$n]=[Collections.Generic.List[object]]::new()}
   $d[$n].Add($o)
  }
+ if($TimingLog){$materializeTimer.Stop();LogTiming 'db_materialize' $materializeTimer.Elapsed.TotalMilliseconds $dt.Rows.Count}
 }
 function DbTrusses($number){
  if($script:TrussBatch.ContainsKey($number)){return ,$script:TrussBatch[$number]}
@@ -591,6 +630,15 @@ $root=(Get-Item -LiteralPath $ProjectsRoot).FullName.TrimEnd('\')
 $stamp=(Get-Date).ToString('yyyyMMdd-HHmmss')
 $outDir=$OutputDirectory.TrimEnd('\')+'-'+$stamp
 [void](New-Item -ItemType Directory -Path (Join-Path $outDir 'projects') -Force)
+if($TimingLog){
+ $script:TimingStart=[Diagnostics.Stopwatch]::StartNew()
+ $script:TimingPath=Join-Path $outDir 'timing.csv'
+ $script:DiagnosticProjectIndex=0
+ $script:DiagnosticKind='setup'
+ WriteText $script:TimingPath "utc,elapsed_ms,phase,project_index,kind,rows,trusses,duration_ms,serialize_ms,write_ms,html_bytes,heap_mb,working_mb,private_mb,cpu_ms,gc0,gc1,gc2`r`n"
+ LogTiming 'start'
+ Write-Host ('Timing log: '+$script:TimingPath)
+}
 WriteText (Join-Path $outDir 'rules.json') (ToJson ([ordered]@{}+@{}) 3)
 $ruleJson=[ordered]@{}
 foreach($k in $Rules.Keys){$ruleJson[$k]=[ordered]@{name=$Rules[$k][0];rule=$Rules[$k][1]}}
@@ -603,8 +651,11 @@ if($SqlUser){
  $builder['Integrated Security']=$false;$builder['User ID']=$SqlUser;$builder['Password']=$env:CSD_SQL_PASSWORD
 }else{$builder['Integrated Security']=$true}
 $script:Conn=[Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+if($TimingLog){LogTiming 'sql_connect_start';$connectTimer=[Diagnostics.Stopwatch]::StartNew()}
 $script:Conn.Open()
+if($TimingLog){$connectTimer.Stop();LogTiming 'sql_connect' $connectTimer.Elapsed.TotalMilliseconds}
 
+$scanTimer=[Diagnostics.Stopwatch]::StartNew()
 $work=@()
 foreach($d in (Get-ChildItem -LiteralPath $root -Directory | Sort-Object Name)){
  if($d.Name -ieq 'DeletedProjects'){continue}
@@ -615,9 +666,17 @@ foreach($d in (Get-ChildItem -LiteralPath $root -Directory | Sort-Object Name)){
  $work+=,@($d.Name,$arc[$arc.Count-1].FullName)
 }
 if($Limit -gt 0){$work=@($work | Select-Object -First $Limit)}
+$scanTimer.Stop()
+LogTiming 'archive_discovery' $scanTimer.Elapsed.TotalMilliseconds $work.Count
 Write-Host ('Projects with archives: '+$work.Count)
 
 function WriteProject($o,$number){
+ if($TimingLog){
+  LogTiming 'report_start' 0 0 $o.counts.trusses
+  $reportTimer=[Diagnostics.Stopwatch]::StartNew()
+  $script:ReportSerializeTicks=0L
+  $script:ReportWriteTicks=0L
+ }
  $st=StateOf $o
  $o.state=$st
  $folder=SafeName $number;$n=2
@@ -698,12 +757,22 @@ function WriteProject($o,$number){
  }finally{$writer.Dispose()}
  $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
  [void]$results.Add($indexRow)
+ if($TimingLog){
+  $reportTimer.Stop()
+  $serializeMs=1000.0*$script:ReportSerializeTicks/[Diagnostics.Stopwatch]::Frequency
+  $writeMs=1000.0*$script:ReportWriteTicks/[Diagnostics.Stopwatch]::Frequency
+  $htmlBytes=([IO.FileInfo]::new((Join-Path $dir 'project.html'))).Length
+  LogTiming 'report' $reportTimer.Elapsed.TotalMilliseconds 0 $o.counts.trusses $serializeMs $writeMs $htmlBytes
+ }
 }
 function FlushProjectRows($writer,$rows,[int]$written){
  if($rows.Count -eq 0){return $written}
+ if($TimingLog){$chunkTimer=[Diagnostics.Stopwatch]::StartNew()}
  $json=(ToJson $rows.ToArray() 50 -compress).Replace('</','<\/')
+ if($TimingLog){$chunkTimer.Stop();$script:ReportSerializeTicks+=$chunkTimer.ElapsedTicks;$chunkTimer.Restart()}
  if($written -gt 0){$writer.Write(',')}
  $writer.Write($json.Substring(1,$json.Length-2))
+ if($TimingLog){$chunkTimer.Stop();$script:ReportWriteTicks+=$chunkTimer.ElapsedTicks}
  $written+=$rows.Count
  $rows.Clear()
  return $written
@@ -713,25 +782,38 @@ $used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnore
 $i=0;$batchEnd=-1
 try{
 foreach($w in $work){
- if($i -gt $batchEnd){$batchEnd=DbBatchEnd $work $i;LoadDbBatch @($work[$i..$batchEnd] | ForEach-Object {$_[0]})}
+ if($TimingLog){$script:DiagnosticKind='archive';$script:DiagnosticProjectIndex=$i+1}
+ if($i -gt $batchEnd){
+  if($TimingLog){LogTiming 'batch_start';$batchTimer=[Diagnostics.Stopwatch]::StartNew()}
+  $batchEnd=DbBatchEnd $work $i
+  LoadDbBatch @($work[$i..$batchEnd] | ForEach-Object {$_[0]})
+  if($TimingLog){$batchTimer.Stop();LogTiming 'batch' $batchTimer.Elapsed.TotalMilliseconds ($batchEnd-$i+1)}
+ }
  $i++
  Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
  $number=$w[0]
  try{
+  if($TimingLog){LogTiming 'analysis_start';$analysisTimer=[Diagnostics.Stopwatch]::StartNew()}
   try{$o=AnalyzeProject $number $w[1] $cut}
   catch{Write-Warning ($number+": "+$_.Exception.Message+" @ "+$_.InvocationInfo.ScriptLineNumber);continue}
+  if($TimingLog){$analysisTimer.Stop();LogTiming 'analysis' $analysisTimer.Elapsed.TotalMilliseconds 0 $o.counts.trusses}
   WriteProject $o $number
- }finally{ReleaseProject $number;$o=$null}
+ }finally{ReleaseProject $number;$o=$null;LogTiming 'project_released'}
 }
 if($IncludeDbOnly){
+ if($TimingLog){$script:DiagnosticKind='db_only';$script:DiagnosticProjectIndex=0;LogTiming 'db_only_discovery_start'}
  $discoveryWatch=[Diagnostics.Stopwatch]::StartNew()
+ $folderScanTimer=[Diagnostics.Stopwatch]::StartNew()
  $have=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
  foreach($d in (Get-ChildItem -LiteralPath $root -Directory)){[void]$have.Add($d.Name)}
+ $folderScanTimer.Stop()
+ LogTiming 'folder_scan' $folderScanTimer.Elapsed.TotalMilliseconds $have.Count
  $dbOnly=[Collections.Generic.List[object]]::new()
  $dbCommand=$script:Conn.CreateCommand()
  $dbCommand.CommandText='SELECT p.ProjectNumber,p.FilesCheckInId FROM dbo.Project p ORDER BY p.ProjectNumber'
  $dbCommand.CommandTimeout=120
  $dbReader=$null;$stoppedEarly=$false
+ if($TimingLog){LogTiming 'sql_discovery_start';$sqlDiscoveryTimer=[Diagnostics.Stopwatch]::StartNew()}
  try{
   $dbReader=$dbCommand.ExecuteReader()
   while($dbReader.Read()){
@@ -747,24 +829,31 @@ if($IncludeDbOnly){
   if($dbReader){$dbReader.Dispose()}
   $dbCommand.Dispose()
  }
+ if($TimingLog){$sqlDiscoveryTimer.Stop();LogTiming 'sql_discovery' $sqlDiscoveryTimer.Elapsed.TotalMilliseconds $dbOnly.Count}
  $discoveryWatch.Stop()
+ LogTiming 'db_only_discovery' $discoveryWatch.Elapsed.TotalMilliseconds $dbOnly.Count
  Write-Verbose ('DB-only discovery: {0} projects in {1:N2}s' -f $dbOnly.Count,$discoveryWatch.Elapsed.TotalSeconds)
  Write-Host ('DB-only projects: '+$dbOnly.Count)
  $k=0;$batchEnd=-1
  foreach($w in $dbOnly){
+  if($TimingLog){$script:DiagnosticProjectIndex=$k+1}
   if($k -gt $batchEnd){
+   if($TimingLog){LogTiming 'batch_start'}
    $batchWatch=[Diagnostics.Stopwatch]::StartNew()
    $batchEnd=DbBatchEnd $dbOnly $k
    LoadDbBatch @($dbOnly[$k..$batchEnd] | ForEach-Object {$_[0]})
    $batchWatch.Stop()
+   LogTiming 'batch' $batchWatch.Elapsed.TotalMilliseconds ($batchEnd-$k+1)
    Write-Verbose ('DB-only batch: {0} projects loaded in {1:N2}s' -f ($batchEnd-$k+1),$batchWatch.Elapsed.TotalSeconds)
   }
   $k++
   Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
   $projectWatch=[Diagnostics.Stopwatch]::StartNew()
   try{
+   if($TimingLog){LogTiming 'analysis_start';$analysisTimer=[Diagnostics.Stopwatch]::StartNew()}
    try{$o=AnalyzeDbOnly $w[0] $w[1]}
    catch{Write-Warning ($w[0]+": "+$_.Exception.Message);continue}
+   if($TimingLog){$analysisTimer.Stop();LogTiming 'analysis' $analysisTimer.Elapsed.TotalMilliseconds 0 $o.counts.trusses}
    $o.state='DB only'
    WriteProject $o $w[0]
    $projectWatch.Stop()
@@ -772,11 +861,12 @@ if($IncludeDbOnly){
     $heapMB=[Math]::Round([GC]::GetTotalMemory($false)/1MB,1)
     Write-Verbose ('DB-only {0}: {1} trusses, report {2:N2}s, managed heap {3:N1} MB' -f $w[0],$o.counts.trusses,$projectWatch.Elapsed.TotalSeconds,$heapMB)
    }
-  }finally{ReleaseProject $w[0];$o=$null}
+  }finally{ReleaseProject $w[0];$o=$null;LogTiming 'project_released'}
  }
 }
 }finally{LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
 
+if($TimingLog){$script:DiagnosticKind='index';$script:DiagnosticProjectIndex=0;LogTiming 'index_start';$indexTimer=[Diagnostics.Stopwatch]::StartNew()}
 $order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Before 2024.r7'=4;'DB only'=5}
 $ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
 $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.state]++}
@@ -841,6 +931,7 @@ $contract=[ordered]@{
 WriteText (Join-Path $outDir 'contract.json') (ToJson $contract 6)
 $index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@AGGC@@',('compared '+$agg.compared+', different '+$agg.different+', not compared '+$agg.notCompared)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString()).Replace('@@LEGEND@@',(CauseLegend))
 WriteText (Join-Path $outDir 'index.html') $index
+if($TimingLog){$indexTimer.Stop();LogTiming 'index' $indexTimer.Elapsed.TotalMilliseconds $ranked.Count;LogTiming 'complete'}
 Write-Host ''
 Write-Host ('Projects: '+$ranked.Count)
 foreach($s in $tabNames){Write-Host ('  '+$s+': '+$cnt[$s])}
