@@ -780,6 +780,7 @@ function FlushProjectRows($writer,$rows,[int]$written){
 $results=[Collections.Generic.List[object]]::new()
 $used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $i=0;$batchEnd=-1
+$progressTimer=[Diagnostics.Stopwatch]::StartNew()
 try{
 foreach($w in $work){
  if($TimingLog){$script:DiagnosticKind='archive';$script:DiagnosticProjectIndex=$i+1}
@@ -790,7 +791,12 @@ foreach($w in $work){
   if($TimingLog){$batchTimer.Stop();LogTiming 'batch' $batchTimer.Elapsed.TotalMilliseconds ($batchEnd-$i+1)}
  }
  $i++
- Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
+ if($i -eq 1 -or $i -eq $work.Count -or $progressTimer.ElapsedMilliseconds -ge 1000){
+  if($TimingLog){$progressCallTimer=[Diagnostics.Stopwatch]::StartNew()}
+  Write-Progress -Activity 'Analyzing projects' -Status ($w[0]+' ('+$i+' of '+$work.Count+')') -PercentComplete (100*$i/$work.Count)
+  if($TimingLog){$progressCallTimer.Stop();LogTiming 'progress' $progressCallTimer.Elapsed.TotalMilliseconds}
+  $progressTimer.Restart()
+ }
  $number=$w[0]
  try{
   if($TimingLog){LogTiming 'analysis_start';$analysisTimer=[Diagnostics.Stopwatch]::StartNew()}
@@ -835,6 +841,7 @@ if($IncludeDbOnly){
  Write-Verbose ('DB-only discovery: {0} projects in {1:N2}s' -f $dbOnly.Count,$discoveryWatch.Elapsed.TotalSeconds)
  Write-Host ('DB-only projects: '+$dbOnly.Count)
  $k=0;$batchEnd=-1
+ $dbProgressTimer=[Diagnostics.Stopwatch]::StartNew()
  foreach($w in $dbOnly){
   if($TimingLog){$script:DiagnosticProjectIndex=$k+1}
   if($k -gt $batchEnd){
@@ -847,7 +854,12 @@ if($IncludeDbOnly){
    Write-Verbose ('DB-only batch: {0} projects loaded in {1:N2}s' -f ($batchEnd-$k+1),$batchWatch.Elapsed.TotalSeconds)
   }
   $k++
-  Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
+  if($k -eq 1 -or $k -eq $dbOnly.Count -or $dbProgressTimer.ElapsedMilliseconds -ge 1000){
+   if($TimingLog){$progressCallTimer=[Diagnostics.Stopwatch]::StartNew()}
+   Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
+   if($TimingLog){$progressCallTimer.Stop();LogTiming 'progress' $progressCallTimer.Elapsed.TotalMilliseconds}
+   $dbProgressTimer.Restart()
+  }
   $projectWatch=[Diagnostics.Stopwatch]::StartNew()
   try{
    if($TimingLog){LogTiming 'analysis_start';$analysisTimer=[Diagnostics.Stopwatch]::StartNew()}
@@ -863,6 +875,7 @@ if($IncludeDbOnly){
    }
   }finally{ReleaseProject $w[0];$o=$null;LogTiming 'project_released'}
  }
+ Write-Progress -Activity 'DB-only projects' -Completed
 }
 }finally{LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
 
