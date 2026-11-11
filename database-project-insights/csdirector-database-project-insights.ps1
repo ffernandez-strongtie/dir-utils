@@ -51,6 +51,7 @@ foreach($inputName in @('ProjectsRoot','Server','Database','OutputDirectory')) {
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 if($Server -ieq 'SST'){$Server='.\SST'}
 $script:TrussColumns=$null
+$script:DbCountCache=[Collections.Generic.Dictionary[string,long]]::new([StringComparer]::OrdinalIgnoreCase)
 $Groups=@('Identity','Version','Geometry','Pitch','Flags')
 $Map=[ordered]@{
  'Quantity'='ComponentQuantity';'NumPlies'='TrussPlyCount';'Thickness'='TrussThicknessInches';'OverallTrussHeight'='OverallTrussHeightInches';'LeftOverhang'='LeftOverhangInches';'RightOverhang'='RightOverhangInches';'LeftCantilever'='LeftCantileverInches';'RightCantilever'='RightCantileverInches';'LeftHeelHeight'='LeftHeelHeightInches';'RightHeelHeight'='RightHeelHeightInches';'PitchLeftTopOver12'='LeftTopPitchOver12';'PitchRightTopOver12'='RightTopPitchOver12';'PitchLeftBottomOver12'='LeftBottomPitchOver12';'PitchRightBottomOver12'='RightBottomPitchOver12';'IsAttic'='IsAttic';'IsGable'='IsGable';'IsGirder'='IsGirder';'IsFlipped'='IsFlipped';'OCSpacing'='OCSpacing'
@@ -243,12 +244,20 @@ function ReadEntryJson($entry){
 }
 function DbBatchEnd($items,[int]$start){
  $last=[Math]::Min($start+49,$items.Count-1)
- $params=@{};$names=for($i=$start;$i -le $last;$i++){$key='p'+($i-$start);$params[$key]=[string]$items[$i][0];'@'+$key}
- $dt=Q ('SELECT p.ProjectNumber,COUNT_BIG(*) AS TrussCount FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+($names -join ',')+') GROUP BY p.ProjectNumber') $params
- $counts=@{};foreach($r in $dt.Rows){$counts[[string]$r['ProjectNumber']]=[long]$r['TrussCount']}
+ $params=@{};$names=[Collections.Generic.List[string]]::new()
+ for($i=$start;$i -le $last;$i++){
+  $number=[string]$items[$i][0]
+  if($script:DbCountCache.ContainsKey($number)){continue}
+  $script:DbCountCache[$number]=0L
+  $key='p'+$names.Count;$params[$key]=$number;$names.Add('@'+$key)
+ }
+ if($names.Count -gt 0){
+  $dt=Q ('SELECT p.ProjectNumber,COUNT_BIG(*) AS TrussCount FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+($names -join ',')+') GROUP BY p.ProjectNumber') $params
+  foreach($r in $dt.Rows){$script:DbCountCache[[string]$r['ProjectNumber']]=[long]$r['TrussCount']}
+ }
  $total=0L;$end=$start
  for($i=$start;$i -le $last;$i++){
-  $count=[long]$counts[[string]$items[$i][0]]
+  $count=$script:DbCountCache[[string]$items[$i][0]]
   if($i -gt $start -and $total+$count -gt 10000){break}
   $total+=$count;$end=$i
  }
@@ -257,6 +266,7 @@ function DbBatchEnd($items,[int]$start){
 function ReleaseProject($number){
  [void]$script:TrussBatch.Remove($number)
  [void]$script:ProjectBatch.Remove($number)
+ [void]$script:DbCountCache.Remove($number)
 }
 function LoadDbBatch([string[]]$numbers){
  if($numbers.Count -gt 50){throw 'DB batch exceeds 50 projects.'}
@@ -354,12 +364,7 @@ function FillFields($row,$j,$r,$h,$F,$stale,$cut){
 function AnalyzeDbOnly($number,$ci){
  $out=[ordered]@{project=$number;archive=$null;archiveTs=$null;dbFilesCheckInId=$ci;notInDb=$false;dbOnly=$true;trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
  $dbt=DbTrusses $number
- foreach($name in ($dbt.Keys | Sort-Object)){
-  $row=[ordered]@{name=$name;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
-  FillDbOnlyFields $row $dbt[$name][0]
-  $out.trusses.Add($row)
- }
- $out.counts=[ordered]@{trusses=$out.trusses.Count;findings=0;bad=0;stale=0;pre=0}
+ $out.counts=[ordered]@{trusses=$dbt.Count;findings=0;bad=0;stale=0;pre=0}
  $out.staleProject=$false
  return ,$out
 }
@@ -628,33 +633,17 @@ function WriteProject($o,$number){
  }
  $o.byRule=$byRule
  $cov=[ordered]@{compared=0;different=0;notCompared=0}
- foreach($t in $o.trusses){$cov.compared+=$t.coverage.compared;$cov.different+=$t.coverage.different;$cov.notCompared+=$t.coverage.notCompared}
+ if($o.dbOnly){
+  $cov.notCompared=$o.counts.trusses*($Map.Count+2)
+ }else{
+  foreach($t in $o.trusses){$cov.compared+=$t.coverage.compared;$cov.different+=$t.coverage.different;$cov.notCompared+=$t.coverage.notCompared}
+ }
  $o.coverage=$cov
  $summary=[ordered]@{project=$number;mode=$(if($Client){'Client'}else{'Server'});database=$Database;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($Client){$null}elseif($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null});status=$(if($Client){'informational-only'}else{'compared'})});trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);coverage=$cov;trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
  WriteText (Join-Path $dir 'summary.json') (ToJson $summary 4)
  $flat=[Collections.Generic.List[object]]::new()
  foreach($f in $o.findings){$flat.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);rule=$Rules[$f.rule][1];project=$number;truss=$f.truss;field=$f.field;dbValue=$f.db;fileValue=$f.file;severity=$f.sev})}
  WriteText (Join-Path $dir 'findings.json') (ToJson $flat.ToArray() 4)
- $blobRows=[Collections.Generic.List[object]]::new()
- $tn=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
- foreach($t in ($o.trusses | Sort-Object @{Expression={if($_.findings.Count -gt 0){0}else{1}}},@{Expression={$_.name}})){
-  $tf=[Collections.Generic.List[object]]::new()
-  $fl=[Collections.Generic.List[object]]::new()
-  foreach($f in $t.findings){
-   $tf.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
-   $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
-  }
-  if($IncludeTrussJson){
-   $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();coverage=$t.coverage}
-   $tfile=SafeName $t.name;$k=2
-   while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
-   WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
-  }
-  $cellArr=[string[]]@($Groups | ForEach-Object {$t.cells[$_]})
-  $ver=if($t.version){$t.version}else{@{}}
-  $blobRows.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage))
- }
- $blob=if($blobRows.Count -gt 0){(ToJson $blobRows.ToArray() 50 -compress).Replace('</','<\/')}else{'[]'}
  $cc=[ordered]@{}
  foreach($f in $o.findings){$nm=RuleName $f;if($cc.Contains($nm)){$cc[$nm]++}else{$cc[$nm]=1}}
  $o.cats=$cc
@@ -664,10 +653,60 @@ function WriteProject($o,$number){
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
  $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'+' | coverage '+$cov.compared+' compared, '+$cov.different+' different, '+$cov.notCompared+' not compared | <a href="../../contract.json">contract.json</a>'
- $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@LEGEND@@',(CauseLegend)).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress)).Replace('@@DATA@@',$blob)
- WriteText (Join-Path $dir 'project.html') $page
+ $page=$ProjectTemplate.Replace('@@CSS@@',$Css).Replace('@@TITLE@@',(Esc $number)).Replace('@@BADGE@@',$Badge[$st]).Replace('@@STATE@@',$st).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@META@@',$meta).Replace('@@LEGEND@@',(CauseLegend)).Replace('@@CHIPS@@',$chips).Replace('@@HEADERS@@',$headers).Replace('@@GROUPS@@',(ToJson $Groups 2 -compress))
+ $split=$page.IndexOf('@@DATA@@',[StringComparison]::Ordinal)
+ if($split -lt 0){throw 'Project template has no data marker.'}
+ $tn=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+ $dbt=$null
+ if($o.dbOnly){
+  $dbt=DbTrusses $number
+  $trussItems=@($dbt.Keys | Sort-Object)
+ }else{
+  $trussItems=@($o.trusses | Sort-Object @{Expression={if($_.findings.Count -gt 0){0}else{1}}},@{Expression={$_.name}})
+ }
+ $writer=[IO.StreamWriter]::new((Join-Path $dir 'project.html'),$false,[Text.UTF8Encoding]::new($false))
+ try{
+  $writer.Write($page.Substring(0,$split))
+  $writer.Write('[')
+  $written=0
+  $chunk=[Collections.Generic.List[object]]::new()
+  foreach($item in $trussItems){
+   if($o.dbOnly){
+    $t=[ordered]@{name=$item;cells=(Cells 'na');findings=[Collections.Generic.List[object]]::new();fields=[Collections.Generic.List[object]]::new();version=$null;pre=$false}
+    FillDbOnlyFields $t $dbt[$item][0]
+   }else{$t=$item}
+   $tf=[Collections.Generic.List[object]]::new()
+   $fl=[Collections.Generic.List[object]]::new()
+   foreach($f in $t.findings){
+    $tf.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);field=$f.field;db=$f.db;file=$f.file;severity=$f.sev;message=$f.msg})
+    $fl.Add([object[]]@((RuleName $f),$f.field,$f.db,$f.file,$f.sev,$f.msg,$f.group))
+   }
+   if($IncludeTrussJson){
+    $tj=[ordered]@{truss=$t.name;project=$number;version=$t.version;cells=$t.cells;pre_r7_db_only=[bool]$t.pre;findings=$tf.ToArray();fields=$t.fields.ToArray();coverage=$t.coverage}
+    $tfile=SafeName $t.name;$k=2
+    while(-not $tn.Add($tfile)){$tfile=(SafeName $t.name)+'_'+$k;$k++}
+    WriteText (Join-Path $dir ('trusses\'+$tfile+'.json')) (ToJson $tj 50)
+   }
+   $cellArr=[string[]]@($Groups | ForEach-Object {$t.cells[$_]})
+   $ver=if($t.version){$t.version}else{@{}}
+   $chunk.Add([object[]]@($t.name,$cellArr,$fl,$ver,$t.fields,$t.coverage))
+   if($chunk.Count -ge 128){$written=FlushProjectRows $writer $chunk $written}
+  }
+  $written=FlushProjectRows $writer $chunk $written
+  $writer.Write(']')
+  $writer.Write($page.Substring($split+'@@DATA@@'.Length))
+ }finally{$writer.Dispose()}
  $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
  [void]$results.Add($indexRow)
+}
+function FlushProjectRows($writer,$rows,[int]$written){
+ if($rows.Count -eq 0){return $written}
+ $json=(ToJson $rows.ToArray() 50 -compress).Replace('</','<\/')
+ if($written -gt 0){$writer.Write(',')}
+ $writer.Write($json.Substring(1,$json.Length-2))
+ $written+=$rows.Count
+ $rows.Clear()
+ return $written
 }
 $results=[Collections.Generic.List[object]]::new()
 $used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -685,6 +724,7 @@ foreach($w in $work){
  }finally{ReleaseProject $number;$o=$null}
 }
 if($IncludeDbOnly){
+ $discoveryWatch=[Diagnostics.Stopwatch]::StartNew()
  $have=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
  foreach($d in (Get-ChildItem -LiteralPath $root -Directory)){[void]$have.Add($d.Name)}
  $dbOnly=[Collections.Generic.List[object]]::new()
@@ -707,17 +747,31 @@ if($IncludeDbOnly){
   if($dbReader){$dbReader.Dispose()}
   $dbCommand.Dispose()
  }
+ $discoveryWatch.Stop()
+ Write-Verbose ('DB-only discovery: {0} projects in {1:N2}s' -f $dbOnly.Count,$discoveryWatch.Elapsed.TotalSeconds)
  Write-Host ('DB-only projects: '+$dbOnly.Count)
  $k=0;$batchEnd=-1
  foreach($w in $dbOnly){
-  if($k -gt $batchEnd){$batchEnd=DbBatchEnd $dbOnly $k;LoadDbBatch @($dbOnly[$k..$batchEnd] | ForEach-Object {$_[0]})}
+  if($k -gt $batchEnd){
+   $batchWatch=[Diagnostics.Stopwatch]::StartNew()
+   $batchEnd=DbBatchEnd $dbOnly $k
+   LoadDbBatch @($dbOnly[$k..$batchEnd] | ForEach-Object {$_[0]})
+   $batchWatch.Stop()
+   Write-Verbose ('DB-only batch: {0} projects loaded in {1:N2}s' -f ($batchEnd-$k+1),$batchWatch.Elapsed.TotalSeconds)
+  }
   $k++
   Write-Progress -Activity 'DB-only projects' -Status ($w[0]+' ('+$k+' of '+$dbOnly.Count+')') -PercentComplete (100*$k/$dbOnly.Count)
+  $projectWatch=[Diagnostics.Stopwatch]::StartNew()
   try{
    try{$o=AnalyzeDbOnly $w[0] $w[1]}
    catch{Write-Warning ($w[0]+": "+$_.Exception.Message);continue}
    $o.state='DB only'
    WriteProject $o $w[0]
+   $projectWatch.Stop()
+   if($VerbosePreference -eq 'Continue'){
+    $heapMB=[Math]::Round([GC]::GetTotalMemory($false)/1MB,1)
+    Write-Verbose ('DB-only {0}: {1} trusses, report {2:N2}s, managed heap {3:N1} MB' -f $w[0],$o.counts.trusses,$projectWatch.Elapsed.TotalSeconds,$heapMB)
+   }
   }finally{ReleaseProject $w[0];$o=$null}
  }
 }
