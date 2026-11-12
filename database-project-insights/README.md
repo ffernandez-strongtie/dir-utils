@@ -20,7 +20,7 @@ Without `-SqlUser` it uses Windows authentication. The password is only read fro
 | `-ProjectId` | all | Limit to specific project numbers |
 | `-Limit` | 0 (all) | Stop after N projects |
 | `-Client` | off | Inspect the Client database instead of the Server one. Defaults become `C:\SST\Client\Projects` and `CSDatabaseClient`. A project folder with an expanded `Trusses` folder is read directly; otherwise its `.CSDProj` is used. The report and every project page are labelled CLIENT or SERVER |
-| `-IncludeDbOnly` | off | Also write pages for DB projects with no archive folder (DB values only, "DB only" tab). Omitted by default |
+| `-IncludeDbOnly` | off | Also write pages for DB projects with no archive folder (DB values only). Qualifying pre-cutoff projects appear in the existing "Before 2024.r7" tab; the rest appear in "DB only". Omitted by default |
 | `-IncludeTrussJson` | off | Also write `projects/<number>/trusses/<truss>.json`. HTML detail and project-level JSON are always included |
 | `-TimingLog` | off | Write `timing.csv` with phase durations, row counts, memory, CPU and garbage collection counters; project ordinals only |
 | `-LegacyCutoffVersion` | `2024.7.2.7` | Truss versions strictly lower are before 2024.r7 (DB was the source of truth) |
@@ -41,10 +41,10 @@ The latest archive per project folder is used. Projects with no archive are not 
 - **Not in DB**: archive exists, no Project row.
 - **Inconsistent**: at least one real mismatch (value, version, checksum, or truss missing on one side) while the DB is current.
 - **Stale DB**: differences exist, but the DB check-in id is older than the archive timestamp (re-saved in Studio since).
-- **Before 2024.r7**: every truss is DB-only at a version below the cutoff; nothing to compare.
+- **Before 2024.r7**: all trusses are below the cutoff and have no comparable Studio files. Includes DB-only projects with readable versions below the cutoff.
 - **Consistent**: no differences in compared values; see coverage for values not compared.
 
-**DB only** means there is no archive folder. Its version comes from DB `ComponentTruss.AnalysisVersion`, including duplicate-name rows. The highest parsed numeric version is shown, not a check-in time. The pre-cutoff mark appears only when every DB truss row has a readable version below `-LegacyCutoffVersion`; missing versions and projects with no DB trusses receive no pre-cutoff mark. With a custom cutoff, the mark shows that version instead of "2024.r7".
+**DB only** means there is no archive folder. Its version comes from DB `ComponentTruss.AnalysisVersion`, including duplicate-name rows. The highest parsed numeric version is shown, not a check-in time. A DB-only project appears in the **Before 2024.r7** state and tab when every DB truss row has a readable version below `-LegacyCutoffVersion`; otherwise it remains in **DB only**. A custom cutoff changes the legacy state label to that version. Within each state, projects with trusses are listed before projects without trusses.
 
 Symbols in the matrix: ✓ match, ≠ mismatch, ↻ stale DB, ⏸ before 2024.r7 DB-only, ∅ not comparable.
 

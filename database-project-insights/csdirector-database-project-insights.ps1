@@ -123,7 +123,9 @@ $Rules=[ordered]@{
  'R-FLD'=@('Truss value differs','Mapped truss JSON field should equal its ComponentHeader/Component/ComponentTruss column (tolerance 0.001).')
 }
 $StaleRules=@('R-CKSUM','R-DB','R-FLD','R-VER','R-FILE')
-$Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Before 2024.r7'='b-pre';'Stale DB'='b-warn';'Not in DB'='b-warn';'DB only'='b-pre'}
+$LegacyState=if($LegacyCutoffVersion -eq '2024.7.2.7'){'Before 2024.r7'}else{'Before '+$LegacyCutoffVersion}
+$Badge=@{'Inconsistent'='b-bad';'Consistent'='b-ok';'Stale DB'='b-warn';'Not in DB'='b-warn';'DB only'='b-pre'}
+$Badge[$LegacyState]='b-pre'
 
 function ParseVer($s){
  if($null -eq $s){return $null}
@@ -547,10 +549,10 @@ function AnalyzeProject($number,$archivePath,$cut){
  return ,$out
 }
 function StateOf($o){
- if($o.dbOnly){return 'DB only'}
+ if($o.dbOnly){if($o.dbVersionInfo.beforeLegacyCutoff -eq $true){return $LegacyState};return 'DB only'}
  if($o.notInDb){return 'Not in DB'}
  foreach($f in $o.findings){if($f.sev -eq 'error'){return 'Inconsistent'}}
- if($o.counts.trusses -gt 0 -and $o.counts.pre -eq $o.counts.trusses){return 'Before 2024.r7'}
+ if($o.counts.trusses -gt 0 -and $o.counts.pre -eq $o.counts.trusses){return $LegacyState}
  if($o.findings.Count -gt 0){return 'Stale DB'}
  'Consistent'
 }
@@ -569,15 +571,15 @@ function CauseDefinitions{
 }
 function CauseLegend{
  $items=foreach($entry in (CauseDefinitions).GetEnumerator()){'<div><b>'+(Esc $entry.Key)+'</b> &mdash; '+(Esc $entry.Value)+'</div>'}
- '<footer class="cause-legend"><h3>How to read this report</h3><p>&#10003; Compared values match &middot; &#8800; Real mismatch &middot; &#8635; Stale DB (archive newer) &middot; &#9208; Before 2024.r7 (expected DB-only data) &middot; &#8709; Not comparable.</p><p>Consistent means the compared values agree, not that every field was verified. Missing JSON means values are not compared; only .tdlTruss files establish file-side truss existence. Check-in dates come from identifiers, not file modification times; no timezone is assumed. Client mode does not compare check-ins.</p><details><summary>Cause definitions</summary>'+($items -join '')+'</details></footer>'
+ '<footer class="cause-legend"><h3>How to read this report</h3><p>&#10003; Compared values match &middot; &#8800; Real mismatch &middot; &#8635; Stale DB (archive newer) &middot; &#9208; '+(Esc $LegacyState)+' (expected DB-only data) &middot; &#8709; Not comparable.</p><p>Consistent means the compared values agree, not that every field was verified. Missing JSON means values are not compared; only .tdlTruss files establish file-side truss existence. Check-in dates come from identifiers, not file modification times; no timezone is assumed. Client mode does not compare check-ins.</p><details><summary>Cause definitions</summary>'+($items -join '')+'</details></footer>'
 }
 function VerdictOf($o,$st){
  $n=$o.counts.trusses
+ if($st -eq $LegacyState){return ('Frozen before '+$LegacyCutoffVersion+' DB state; no Studio files to compare.')}
  switch($st){
   'Consistent'{'No differences in compared values; see coverage for values not compared.'}
   'Not in DB'{'Archive exists, but the project is not in the DB'}
   'DB only'{'In the DB, but no archive folder on disk. DB values only; nothing to compare.'}
-  'Before 2024.r7'{'Frozen before 2024.r7 DB state; no Studio files to compare.'}
   'Stale DB'{if($o.staleProject){"Check-in times differ. $($o.counts.stale) of $n trusses have stale differences."}else{'Check-in times differ; see legend.'}}
   default{"$($o.counts.bad) of $n trusses have real mismatches."}
  }
@@ -640,13 +642,13 @@ draw();
 
 $IndexTemplate=@'
 <!doctype html><meta charset=utf-8><title>CSDirector / TrussStudio Insights</title><style>@@CSS@@</style>
-<header><h1>CSDirector / TrussStudio Insights <span class="badge b-warn">@@COUNT@@ projects</span><span class="badge b-pre" style="float:right">@@MODE@@</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. Before 2024.r7 DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@. Aggregate @@AGGC@@. Contract: <a href="contract.json">contract.json</a>.</small></header>
+<header><h1>CSDirector / TrussStudio Insights <span class="badge b-warn">@@COUNT@@ projects</span><span class="badge b-pre" style="float:right">@@MODE@@</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. @@LEGACY@@ DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@. Aggregate @@AGGC@@. Contract: <a href="contract.json">contract.json</a>.</small></header>
 <main><div class="tabs">@@TABS@@</div>
 <p><input type=text id=q placeholder="filter project number"> Issue: @@CHIPS@@</p>
 <table><thead><tr><th>Project</th><th>State</th><th>DB-only version (highest)</th><th>Verdict</th><th>Top causes</th><th>Trusses</th></tr></thead><tbody id=tb>@@ROWS@@</tbody></table>
 @@LEGEND@@</main>
 <script>let t='Inconsistent';const cs=new Set();function f(){const q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#tb tr').forEach(r=>{const rc=(r.dataset.c||'').split('|');r.style.display=(r.dataset.s==t&&r.textContent.toLowerCase().indexOf(q)>=0&&(!cs.size||[...cs].some(c=>rc.includes(c))))?'':'none'})}
-document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x==e));f()});document.querySelectorAll('.chip').forEach(e=>e.onclick=()=>{const c=e.dataset.c;cs.has(c)?cs.delete(c):cs.add(c);e.classList.toggle('on');f()});document.getElementById('q').oninput=f;</script>
+document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x==e));f()});document.querySelectorAll('.chip').forEach(e=>e.onclick=()=>{const c=e.dataset.c;cs.has(c)?cs.delete(c):cs.add(c);e.classList.toggle('on');f()});document.getElementById('q').oninput=f;f();</script>
 '@
 
 if($Server -ieq 'SST'){$Server='.\SST'}
@@ -807,7 +809,7 @@ function WriteProject($o,$number){
   $writer.Write(']')
   $writer.Write($page.Substring($split+'@@DATA@@'.Length))
  }finally{$writer.Dispose()}
- $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;dbVersionInfo=$(if($o.dbOnly){$o.dbVersionInfo}else{$null});counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
+ $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;dbOnly=[bool]$o.dbOnly;dbVersionInfo=$(if($o.dbOnly){$o.dbVersionInfo}else{$null});counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
  [void]$results.Add($indexRow)
  if($TimingLog){
   $reportTimer.Stop()
@@ -918,7 +920,6 @@ if($IncludeDbOnly){
    try{$o=AnalyzeDbOnly $w[0] $w[1] $cut}
    catch{Write-Warning ($w[0]+": "+$_.Exception.Message);continue}
    if($TimingLog){$analysisTimer.Stop();LogTiming 'analysis' $analysisTimer.Elapsed.TotalMilliseconds 0 $o.counts.trusses}
-   $o.state='DB only'
    WriteProject $o $w[0]
    $projectWatch.Stop()
    if($VerbosePreference -eq 'Continue'){
@@ -932,23 +933,21 @@ if($IncludeDbOnly){
 }finally{LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
 
 if($TimingLog){$script:DiagnosticKind='index';$script:DiagnosticProjectIndex=0;LogTiming 'index_start';$indexTimer=[Diagnostics.Stopwatch]::StartNew()}
-$order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'Before 2024.r7'=4;'DB only'=5}
-$ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
+$order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'DB only'=5}
+$order[$LegacyState]=4
+$ranked=@($results | Sort-Object @{Expression={$order[$_.state]}},@{Expression={if($_.counts.trusses -gt 0){0}else{1}}},@{Expression={-($_.counts.bad+$_.counts.stale)}},@{Expression={$_.project}})
 $cnt=@{};foreach($s in $order.Keys){$cnt[$s]=0};foreach($o in $ranked){$cnt[$o.state]++}
-$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent','Before 2024.r7')
+$tabNames=@('Inconsistent','Stale DB','Not in DB','Consistent',$LegacyState)
 if($IncludeDbOnly){$tabNames+='DB only'}
 $tabCount=$cnt
-$tabHints=@{'Inconsistent'='Files and database disagree';'Stale DB'='Database older than archive';'Not in DB'='Archive has no project row';'Consistent'='No differences in compared values';'Before 2024.r7'='Database is the source';'DB only'='No archive folder'}
+$tabHints=@{'Inconsistent'='Files and database disagree';'Stale DB'='Database older than archive';'Not in DB'='Archive has no project row';'Consistent'='No differences in compared values';'DB only'='No archive folder'}
+$tabHints[$LegacyState]='Database is the source'
 $tabs=(($tabNames | ForEach-Object {'<div class="tab'+$(if($_ -eq 'Inconsistent'){' on'}else{''})+'" data-t="'+$_+'"><b>'+$tabCount[$_]+'</b>'+$_+'<br><span>'+$tabHints[$_]+'</span></div>'}) -join '')
 $allChips=(((CauseDefinitions).GetEnumerator() | ForEach-Object {'<span class="chip" data-c="'+(Esc $_.Key)+'" title="'+(Esc $_.Value)+'">'+(Esc $_.Key)+'</span>'}) -join '')
 $sb=[Text.StringBuilder]::new()
 foreach($o in $ranked){
  $top=(($o.cats.GetEnumerator() | Sort-Object @{Expression={-$_.Value}},@{Expression={$_.Key}} | Select-Object -First 2 | ForEach-Object {'<span class="badge b-pre">'+(Esc $_.Key)+' '+$_.Value+'</span>'}) -join '')
- $versionText=if($o.state -eq 'DB only' -and $o.dbVersionInfo.highestAnalysisVersion){Esc $o.dbVersionInfo.highestAnalysisVersion}else{'&mdash;'}
- if($o.state -eq 'DB only' -and $o.dbVersionInfo.beforeLegacyCutoff -eq $true){
-  $versionFlag=if($LegacyCutoffVersion -eq '2024.7.2.7'){'Pre-2024.r7'}else{'Before '+$LegacyCutoffVersion}
-  $versionText+='<br><small>'+(Esc $versionFlag)+'</small>'
- }
+ $versionText=if($o.dbOnly -and $o.dbVersionInfo.highestAnalysisVersion){Esc $o.dbVersionInfo.highestAnalysisVersion}else{'&mdash;'}
  [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+$versionText+'</td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
 }
 $agg=[ordered]@{compared=0;different=0;notCompared=0}
@@ -999,7 +998,7 @@ $contract=[ordered]@{
  coverage='compared/different/notCompared for mapped fields, version and checksum only; unmapped inventory excluded; values not compared are not claims of equality'
 }
 WriteText (Join-Path $outDir 'contract.json') (ToJson $contract 6)
-$index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@AGGC@@',('compared '+$agg.compared+', different '+$agg.different+', not compared '+$agg.notCompared)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString()).Replace('@@LEGEND@@',(CauseLegend))
+$index=$IndexTemplate.Replace('@@CSS@@',$Css).Replace('@@MODE@@',(Esc $modeLabel)).Replace('@@COUNT@@',[string]$ranked.Count).Replace('@@LEGACY@@',(Esc $LegacyState)).Replace('@@WHEN@@',(Get-Date).ToString('yyyy-MM-dd HH:mm')).Replace('@@SOURCE@@',(Esc $root)).Replace('@@AGGC@@',('compared '+$agg.compared+', different '+$agg.different+', not compared '+$agg.notCompared)).Replace('@@TABS@@',$tabs).Replace('@@CHIPS@@',$allChips).Replace('@@ROWS@@',$sb.ToString()).Replace('@@LEGEND@@',(CauseLegend))
 WriteText (Join-Path $outDir 'index.html') $index
 if($TimingLog){$indexTimer.Stop();LogTiming 'index' $indexTimer.Elapsed.TotalMilliseconds $ranked.Count;LogTiming 'complete'}
 Write-Host ''
