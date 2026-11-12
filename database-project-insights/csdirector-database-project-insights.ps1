@@ -138,32 +138,20 @@ function ParseVer($s){
  while($k -lt 4){$key=$key*1000000;$k++}
  return $key
 }
-function DbVersionProfile($dbt,$cut){
- $highest=$null;$highestKey=$null;$rowCount=0;$before=0;$current=0;$unknown=0
+function DbOnlyVersionInfo($dbt,$cut){
+ $highest=$null;$highestKey=$null;$rowCount=0;$unknown=$false;$hasCurrent=$false
  foreach($name in $dbt.Keys){
   foreach($r in $dbt[$name]){
    $rowCount++
    $raw=$r['AnalysisVersion']
    $key=ParseVer $raw
-   if($null -eq $key){$unknown++;continue}
-   if($key -lt $cut){$before++}else{$current++}
+   if($null -eq $key){$unknown=$true;continue}
+   if($key -ge $cut){$hasCurrent=$true}
    if($null -eq $highestKey -or $key -gt $highestKey -or ($key -eq $highestKey -and [string]::CompareOrdinal([string]$raw,$highest) -gt 0)){$highestKey=$key;$highest=[string]$raw}
   }
  }
- $class=if($rowCount -eq 0){'no-trusses'}elseif($unknown -gt 0){'unknown'}elseif($before -gt 0 -and $current -gt 0){'mixed'}elseif($before -gt 0){'before-cutoff'}else{'at-or-after-cutoff'}
- return [ordered]@{highestAnalysisVersion=$highest;classification=$class;cutoffVersion=$LegacyCutoffVersion;dbTrussRows=$rowCount;beforeCutoffRows=$before;atOrAfterCutoffRows=$current;unknownVersionRows=$unknown}
-}
-function DbVersionLabel($profile){
- if($null -eq $profile){return 'Not in DB'}
- $defaultCutoff=($profile.cutoffVersion -eq '2024.7.2.7')
- switch($profile.classification){
-  'no-trusses' {return 'No DB trusses'}
-  'unknown' {return 'Unknown versions'}
-  'mixed' {return 'Mixed versions'}
-  'before-cutoff' {if($defaultCutoff){return 'All pre-r7'};return ('All before '+$profile.cutoffVersion)}
-  'at-or-after-cutoff' {if($defaultCutoff){return 'All r7+'};return ('All at/after '+$profile.cutoffVersion)}
- }
- return 'Unknown versions'
+ $preCutoff=if($hasCurrent){$false}elseif($rowCount -eq 0 -or $unknown){$null}else{$true}
+ return [ordered]@{highestAnalysisVersion=$highest;beforeLegacyCutoff=$preCutoff}
 }
 function VerLess($a,$b){$a -lt $b}
 function Esc($s){[Net.WebUtility]::HtmlEncode([string]$s)}
@@ -430,7 +418,7 @@ function FillFields($row,$j,$r,$h,$F,$stale,$cut){
 function AnalyzeDbOnly($number,$ci,$cut){
  $out=[ordered]@{project=$number;archive=$null;archiveTs=$null;dbFilesCheckInId=$ci;notInDb=$false;dbOnly=$true;trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
  $dbt=DbTrusses $number
- $out.versionProfile=DbVersionProfile $dbt $cut
+ $out.dbVersionInfo=DbOnlyVersionInfo $dbt $cut
  $out.counts=[ordered]@{trusses=$dbt.Count;findings=0;bad=0;stale=0;pre=0}
  $out.staleProject=$false
  return ,$out
@@ -478,7 +466,6 @@ function AnalyzeProject($number,$archivePath,$cut){
  $dbt=[Collections.Generic.Dictionary[string,object]]::new()
  if($hasProject){$dbt=DbTrusses $number}
  $out=[ordered]@{project=$number;archive=$(if($isDir){[IO.Path]::GetFileName($archivePath)+' (expanded folder)'}else{[IO.Path]::GetFileName($archivePath)});archiveTs=$ts;dbFilesCheckInId=$dbCheckIn;notInDb=(-not $hasProject);trusses=[Collections.Generic.List[object]]::new();findings=[Collections.Generic.List[object]]::new()}
- $out.versionProfile=if($hasProject){DbVersionProfile $dbt $cut}else{$null}
  $F=$out.findings
  if(-not $hasProject){
   $F.Add([ordered]@{rule='R-PROJ';truss=$null;field='Project';db=$null;file=$number;sev='error';msg='Project not in DB';group='Project'})
@@ -656,7 +643,7 @@ $IndexTemplate=@'
 <header><h1>CSDirector / TrussStudio Insights <span class="badge b-warn">@@COUNT@@ projects</span><span class="badge b-pre" style="float:right">@@MODE@@</span></h1><small>Summary only. Open a project for the truss-by-truss field comparison. Before 2024.r7 DB-only projects are not counted as inconsistent; Stale DB means the file is newer than the DB, not a data fault. Generated @@WHEN@@ from @@SOURCE@@. Aggregate @@AGGC@@. Contract: <a href="contract.json">contract.json</a>.</small></header>
 <main><div class="tabs">@@TABS@@</div>
 <p><input type=text id=q placeholder="filter project number"> Issue: @@CHIPS@@</p>
-<table><thead><tr><th>Project</th><th>State</th><th>Highest DB version</th><th>Verdict</th><th>Top causes</th><th>Trusses</th></tr></thead><tbody id=tb>@@ROWS@@</tbody></table>
+<table><thead><tr><th>Project</th><th>State</th><th>DB-only version (highest)</th><th>Verdict</th><th>Top causes</th><th>Trusses</th></tr></thead><tbody id=tb>@@ROWS@@</tbody></table>
 @@LEGEND@@</main>
 <script>let t='Inconsistent';const cs=new Set();function f(){const q=document.getElementById('q').value.toLowerCase();document.querySelectorAll('#tb tr').forEach(r=>{const rc=(r.dataset.c||'').split('|');r.style.display=(r.dataset.s==t&&r.textContent.toLowerCase().indexOf(q)>=0&&(!cs.size||[...cs].some(c=>rc.includes(c))))?'':'none'})}
 document.querySelectorAll('.tab').forEach(e=>e.onclick=()=>{t=e.dataset.t;document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x==e));f()});document.querySelectorAll('.chip').forEach(e=>e.onclick=()=>{const c=e.dataset.c;cs.has(c)?cs.delete(c):cs.add(c);e.classList.toggle('on');f()});document.getElementById('q').oninput=f;</script>
@@ -737,7 +724,12 @@ function WriteProject($o,$number){
   foreach($t in $o.trusses){$cov.compared+=$t.coverage.compared;$cov.different+=$t.coverage.different;$cov.notCompared+=$t.coverage.notCompared}
  }
  $o.coverage=$cov
- $summary=[ordered]@{project=$number;mode=$(if($Client){'Client'}else{'Server'});database=$Database;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($Client){$null}elseif($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null});status=$(if($Client){'informational-only'}else{'compared'})});trusses=$o.counts.trusses;highestDbAnalysisVersion=$(if($null -ne $o.versionProfile){$o.versionProfile.highestAnalysisVersion}else{$null});dbVersionProfile=$o.versionProfile;verdict=(VerdictOf $o $st);coverage=$cov;trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
+ $summary=[ordered]@{project=$number;mode=$(if($Client){'Client'}else{'Server'});database=$Database;state=$st;archive=$o.archive;archiveTimestamp=$o.archiveTs;dbFilesCheckInId=$o.dbFilesCheckInId;projectValues=@([ordered]@{field='FilesCheckInId';db=$o.dbFilesCheckInId;file=$o.archiveTs;match=$(if($Client){$null}elseif($o.archiveTs -and $null -ne $o.dbFilesCheckInId){$o.dbFilesCheckInId -eq $o.archiveTs}else{$null});status=$(if($Client){'informational-only'}else{'compared'})});trusses=$o.counts.trusses;verdict=(VerdictOf $o $st);coverage=$cov;trussesWithRealMismatch=$o.counts.bad;trussesStaleDb=$o.counts.stale;pre_r7_db_only_trusses=$o.counts.pre;findingsByRule=$byRule;findingsBySeverity=$bySev}
+ if($o.dbOnly){
+  $summary['highestDbAnalysisVersion']=$o.dbVersionInfo.highestAnalysisVersion
+  $summary['beforeLegacyCutoff']=$o.dbVersionInfo.beforeLegacyCutoff
+  $summary['legacyCutoffVersion']=$LegacyCutoffVersion
+ }
  WriteText (Join-Path $dir 'summary.json') (ToJson $summary 4)
  $flat=[Collections.Generic.List[object]]::new()
  foreach($f in $o.findings){$flat.Add([ordered]@{ruleId=$f.rule;ruleName=(RuleName $f);rule=$Rules[$f.rule][1];project=$number;truss=$f.truss;field=$f.field;dbValue=$f.db;fileValue=$f.file;severity=$f.sev})}
@@ -750,8 +742,13 @@ function WriteProject($o,$number){
  }) -join '')
  if(-not $chips){$chips='no findings'}
  $headers=(($Groups | Where-Object {$_ -ne 'Version'} | ForEach-Object {'<th class=cell>'+$_+'</th>'}) -join '')
- $highestText=if($null -eq $o.versionProfile){'not in DB'}elseif($o.versionProfile.highestAnalysisVersion){Esc $o.versionProfile.highestAnalysisVersion}elseif($o.versionProfile.dbTrussRows -eq 0){'none'}else{'unknown'}
- $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+' | highest DB version '+$highestText+$(if($o.dbOnly){' | '+(Esc (DbVersionLabel $o.versionProfile))}else{''})+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'+' | coverage '+$cov.compared+' compared, '+$cov.different+' different, '+$cov.notCompared+' not compared | <a href="../../contract.json">contract.json</a>'
+ $versionMeta=''
+ if($o.dbOnly){
+  $dbVersionText=if($o.dbVersionInfo.highestAnalysisVersion){Esc $o.dbVersionInfo.highestAnalysisVersion}elseif($o.counts.trusses -eq 0){'none'}else{'unknown'}
+  $versionMeta=' | DB version '+$dbVersionText
+  if($o.dbVersionInfo.beforeLegacyCutoff -eq $true){$versionMeta+=' (before '+(Esc $LegacyCutoffVersion)+')'}
+ }
+ $meta=$(if($o.archive){'archive '+(Esc $o.archive)}else{'no archive folder'})+' | DB FilesCheckInId '+(Esc $o.dbFilesCheckInId)+$versionMeta+' | '+$o.counts.trusses+' trusses | '+$o.counts.bad+' real mismatch | '+$o.counts.stale+' stale-DB | '+$o.counts.pre+' before 2024.r7 DB-only (not counted)'+' | coverage '+$cov.compared+' compared, '+$cov.different+' different, '+$cov.notCompared+' not compared | <a href="../../contract.json">contract.json</a>'
  if($o.dbOnly -and -not $script:DbOnlyMetaJson){
   $dbMeta=[Collections.Generic.List[object]]::new()
   foreach($fld in $Map.Keys){$m=$MapMeta[$fld];$dbMeta.Add([object[]]@($fld,$m.group,$Map[$fld],$m.basis,$m.policy))}
@@ -810,7 +807,7 @@ function WriteProject($o,$number){
   $writer.Write(']')
   $writer.Write($page.Substring($split+'@@DATA@@'.Length))
  }finally{$writer.Dispose()}
- $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;versionProfile=$o.versionProfile;counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
+ $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;dbVersionInfo=$(if($o.dbOnly){$o.dbVersionInfo}else{$null});counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
  [void]$results.Add($indexRow)
  if($TimingLog){
   $reportTimer.Stop()
@@ -947,9 +944,12 @@ $allChips=(((CauseDefinitions).GetEnumerator() | ForEach-Object {'<span class="c
 $sb=[Text.StringBuilder]::new()
 foreach($o in $ranked){
  $top=(($o.cats.GetEnumerator() | Sort-Object @{Expression={-$_.Value}},@{Expression={$_.Key}} | Select-Object -First 2 | ForEach-Object {'<span class="badge b-pre">'+(Esc $_.Key)+' '+$_.Value+'</span>'}) -join '')
- $versionText=if($null -ne $o.versionProfile -and $o.versionProfile.highestAnalysisVersion){Esc $o.versionProfile.highestAnalysisVersion}else{'&mdash;'}
- $dbOnlyClass=if($o.state -eq 'DB only'){'<br><small>'+(Esc (DbVersionLabel $o.versionProfile))+'</small>'}else{''}
- [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span>'+$dbOnlyClass+'</td><td>'+$versionText+'</td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
+ $versionText=if($o.state -eq 'DB only' -and $o.dbVersionInfo.highestAnalysisVersion){Esc $o.dbVersionInfo.highestAnalysisVersion}else{'&mdash;'}
+ if($o.state -eq 'DB only' -and $o.dbVersionInfo.beforeLegacyCutoff -eq $true){
+  $versionFlag=if($LegacyCutoffVersion -eq '2024.7.2.7'){'Pre-2024.r7'}else{'Before '+$LegacyCutoffVersion}
+  $versionText+='<br><small>'+(Esc $versionFlag)+'</small>'
+ }
+ [void]$sb.Append('<tr data-s="'+$o.state+'" data-c="'+(Esc ($o.cats.Keys -join '|'))+'"><td>'+$(if($o.folder){'<a href="projects/'+(Esc $o.folder)+'/project.html">'+(Esc $o.project)+'</a>'}else{Esc $o.project})+'</td><td><span class="badge '+$Badge[$o.state]+'">'+$o.state+'</span></td><td>'+$versionText+'</td><td>'+(Esc (VerdictOf $o $o.state))+'</td><td>'+$top+'</td><td>'+$o.counts.trusses+'</td></tr>')
 }
 $agg=[ordered]@{compared=0;different=0;notCompared=0}
 foreach($o in $ranked){$agg.compared+=$o.coverage.compared;$agg.different+=$o.coverage.different;$agg.notCompared+=$o.coverage.notCompared}

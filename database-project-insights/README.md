@@ -29,9 +29,9 @@ The latest archive per project folder is used. Projects with no archive are not 
 
 ## Output
 
-- `index.html`: one row per project with state, highest DB analysis version, verdict, top causes and truss count; DB-only rows also show whether their DB versions are all before the cutoff, all at or after it, mixed, unknown, or absent; tabs and issue filters; aggregate coverage totals and a link to the contract manifest.
+- `index.html`: one row per project with state, verdict, top causes and truss count. The DB-only version column shows the highest parsed `ComponentTruss.AnalysisVersion` for DB-only projects and marks it pre-2024.r7 only when every DB truss row is below the configured cutoff.
 - `projects/<number>/project.html`: one row per truss with a symbol matrix; click a row for the field-by-field table, per-truss coverage (compared / different / not compared).
-- `projects/<number>/summary.json`, `findings.json`: always included machine-readable project detail. The summary includes `highestDbAnalysisVersion` and `dbVersionProfile` with version class and counts.
+- `projects/<number>/summary.json`, `findings.json`: always included machine-readable project detail. DB-only summaries include `highestDbAnalysisVersion`, `beforeLegacyCutoff` and `legacyCutoffVersion`.
 - `projects/<number>/trusses/<truss>.json`: optional, written only with `-IncludeTrussJson`; carries the per-truss coverage counts and the explicit comparison status of every mapped field (each with its comparison policy and basis; candidate rows are never flagged).
 - `contract.json`: a manifest generated from the same map metadata as the comparison — every mapped pair with group, comparison policy and evidence basis, plus candidates, pending nested/structured encodings and pending lookup identities.
 - `rules.json`: rule id to plain name and description.
@@ -44,7 +44,7 @@ The latest archive per project folder is used. Projects with no archive are not 
 - **Before 2024.r7**: every truss is DB-only at a version below the cutoff; nothing to compare.
 - **Consistent**: no differences in compared values; see coverage for values not compared.
 
-**DB only** means there is no archive folder; it does not imply that the DB trusses are before 2024.r7. The version class scans every DB truss row, including duplicate names, using `ComponentTruss.AnalysisVersion` and `-LegacyCutoffVersion`. It reports "all pre-r7" only when every row has a readable version below the default cutoff. Any missing or unreadable version makes the class "unknown"; a project with no DB truss rows is labelled "no DB trusses". The highest DB analysis version is the largest parsed numeric version, not the most recently saved row. With a custom cutoff, the class label uses that cutoff instead of "r7".
+**DB only** means there is no archive folder. Its version comes from DB `ComponentTruss.AnalysisVersion`, including duplicate-name rows. The highest parsed numeric version is shown, not a check-in time. The pre-cutoff mark appears only when every DB truss row has a readable version below `-LegacyCutoffVersion`; missing versions and projects with no DB trusses receive no pre-cutoff mark. With a custom cutoff, the mark shows that version instead of "2024.r7".
 
 Symbols in the matrix: ✓ match, ≠ mismatch, ↻ stale DB, ⏸ before 2024.r7 DB-only, ∅ not comparable.
 
