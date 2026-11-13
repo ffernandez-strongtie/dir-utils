@@ -322,6 +322,30 @@ function ReleaseProject($number){
  [void]$script:ProjectBatch.Remove($number)
  [void]$script:DbCountCache.Remove($number)
 }
+function ReadTrussRows($reader){
+ $rowCount=0L
+ $columnNames=[string[]]::new($reader.FieldCount)
+ for($j=0;$j -lt $columnNames.Length;$j++){$columnNames[$j]=$reader.GetName($j)}
+ $values=[object[]]::new($columnNames.Length)
+ while($reader.Read()){
+  $rowCount++
+  [void]$reader.GetValues($values)
+  $number=[string]$values[0]
+  if(-not $script:TrussBatch.ContainsKey($number)){$script:TrussBatch[$number]=[Collections.Generic.Dictionary[string,object]]::new()}
+  $d=$script:TrussBatch[$number];$o=@{}
+  for($j=1;$j -lt $columnNames.Length;$j++){
+   $v=$values[$j];$name=$columnNames[$j]
+   if($v -is [DBNull]){$o[$name]=$null}
+   elseif($v -is [byte[]]){if($name -eq 'TrussFileCheckSum'){$o[$name]=[BitConverter]::ToString($v)}}
+   elseif($v -is [guid] -or $v -is [datetime]){$o[$name]=[string]$v}
+   else{$o[$name]=$v}
+  }
+  $n=[string]$o['Name']
+  if(-not $d.ContainsKey($n)){$d[$n]=[Collections.Generic.List[object]]::new()}
+  $d[$n].Add($o)
+ }
+ return $rowCount
+}
 function LoadDbBatch([string[]]$numbers){
  if($numbers.Count -gt 50){throw 'DB batch exceeds 50 projects.'}
  $script:ProjectBatch=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -342,25 +366,17 @@ function LoadDbBatch([string[]]$numbers){
  }
  $columns=@('AnalysisVersion','CompatibilityVersion')+@($Map.Values | Where-Object {$_ -notin @('ComponentQuantity','WeightPounds','IsSymmetrical')})
  $select=(@($columns | Sort-Object -Unique | Where-Object {$script:TrussColumns.Contains($_)} | ForEach-Object {',t.['+$_.Replace(']',']]')+']'}) -join '')
- $dt=Q ('SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,h.WeightPounds,h.IsSymmetrical,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name') $params 'sql_trusses'
- if($TimingLog){LogTiming 'db_materialize_start' 0 $dt.Rows.Count;$materializeTimer=[Diagnostics.Stopwatch]::StartNew()}
- foreach($r in $dt.Rows){
-  $number=[string]$r['ProjectNumber']
-  if(-not $script:TrussBatch.ContainsKey($number)){$script:TrussBatch[$number]=[Collections.Generic.Dictionary[string,object]]::new()}
-  $d=$script:TrussBatch[$number];$o=@{}
-  foreach($col in $dt.Columns){
-   if($col.ColumnName -eq 'ProjectNumber'){continue}
-   $v=$r[$col.ColumnName]
-   if($v -is [DBNull]){$o[$col.ColumnName]=$null}
-   elseif($v -is [byte[]]){if($col.ColumnName -eq 'TrussFileCheckSum'){$o[$col.ColumnName]=[BitConverter]::ToString($v)}}
-   elseif($v -is [guid] -or $v -is [datetime]){$o[$col.ColumnName]=[string]$v}
-   else{$o[$col.ColumnName]=$v}
-  }
-  $n=[string]$o['Name']
-  if(-not $d.ContainsKey($n)){$d[$n]=[Collections.Generic.List[object]]::new()}
-  $d[$n].Add($o)
- }
- if($TimingLog){$materializeTimer.Stop();LogTiming 'db_materialize' $materializeTimer.Elapsed.TotalMilliseconds $dt.Rows.Count}
+ $cmd=$script:Conn.CreateCommand()
+ $cmd.CommandText='SELECT p.ProjectNumber,h.Name,h.TrussFileCheckSum,h.WeightPounds,h.IsSymmetrical,c.ComponentQuantity'+$select+' FROM dbo.Project p JOIN dbo.ComponentHeader h ON h.ProjectEventKey=p.EventKey LEFT JOIN dbo.Component c ON c.ComponentKey=h.ComponentHeaderKey LEFT JOIN dbo.ComponentTruss t ON t.ComponentKey=c.ComponentKey WHERE p.ProjectNumber IN ('+$filter+') ORDER BY p.ProjectNumber,h.Name'
+ $cmd.CommandTimeout=120
+ foreach($k in $params.Keys){[void]$cmd.Parameters.AddWithValue('@'+$k,$params[$k])}
+ $reader=$null
+ try{
+  if($TimingLog){LogTiming 'sql_trusses_stream_start';$streamTimer=[Diagnostics.Stopwatch]::StartNew()}
+  $reader=$cmd.ExecuteReader()
+  $rowCount=ReadTrussRows $reader
+  if($TimingLog){$streamTimer.Stop();LogTiming 'sql_trusses_stream' $streamTimer.Elapsed.TotalMilliseconds $rowCount}
+ }finally{if($reader){$reader.Dispose()};$cmd.Dispose()}
 }
 function DbTrusses($number){
  if($script:TrussBatch.ContainsKey($number)){return ,$script:TrussBatch[$number]}
