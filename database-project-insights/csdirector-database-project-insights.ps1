@@ -28,13 +28,15 @@ param(
  [ValidateRange(0,2147483647)][int]$Limit=0,
  [switch]$IncludeDbOnly,
  [switch]$IncludeTrussJson,
- [switch]$TimingLog
+ [switch]$TimingLog,
+ [ValidateRange(1,2)][int]$ParallelProjects=2
 )
 $ErrorActionPreference='Stop'
 Write-Host ''
 Write-Host 'CSDirector: Database and Project file Insights' -ForegroundColor Cyan
 Write-Host ('Compares DB trusses with TrussStudio files in each .csdproj using '+$(if($SqlUser){'SQL authentication ('+$SqlUser+').'}else{'Windows authentication.'}))
 Write-Host ('Target: '+$(if($Client){'Client'}else{'Server'})+' database and projects.')
+Write-Host ('Project workers: '+$ParallelProjects)
 Write-Host 'Archives and database records are read only.'
 Write-Host 'Press Enter to accept each default shown in brackets. Command-line values skip their prompts.'
 Write-Host ''
@@ -714,7 +716,7 @@ $scanTimer.Stop()
 LogTiming 'archive_discovery' $scanTimer.Elapsed.TotalMilliseconds $work.Count
 Write-Host ('Projects with archives: '+$work.Count)
 
-function WriteProject($o,$number){
+function WriteProject($o,$number,$folderOverride=$null){
  if($TimingLog){
   LogTiming 'report_start' 0 0 $o.counts.trusses
   $reportTimer=[Diagnostics.Stopwatch]::StartNew()
@@ -723,8 +725,10 @@ function WriteProject($o,$number){
  }
  $st=StateOf $o
  $o.state=$st
- $folder=SafeName $number;$n=2
- while(-not $used.Add($folder)){$folder=(SafeName $number)+'_'+$n;$n++}
+ if($null -ne $folderOverride){$folder=$folderOverride}else{
+  $folder=SafeName $number;$n=2
+  while(-not $used.Add($folder)){$folder=(SafeName $number)+'_'+$n;$n++}
+ }
  $o.folder=$folder
  $dir=Join-Path $outDir ('projects\'+$folder)
  [void](New-Item -ItemType Directory -Path $dir -Force)
@@ -826,6 +830,7 @@ function WriteProject($o,$number){
   $writer.Write($page.Substring($split+'@@DATA@@'.Length))
  }finally{$writer.Dispose()}
  $indexRow=[ordered]@{project=$number;folder=$folder;state=$st;dbOnly=[bool]$o.dbOnly;dbVersionInfo=$(if($o.dbOnly){$o.dbVersionInfo}else{$null});counts=$o.counts;coverage=$cov;cats=$cc;staleProject=[bool]$o.staleProject}
+ if($script:ParallelWorker){return ,$indexRow}
  [void]$results.Add($indexRow)
  if($TimingLog){
   $reportTimer.Stop()
@@ -847,6 +852,86 @@ function FlushProjectRows($writer,$rows,[int]$written){
  $rows.Clear()
  return $written
 }
+function StartParallelProject($number,$archive,$dbOnly,$ci,$ordinal,$kind){
+ $folder=SafeName $number;$suffix=2
+ while(-not $used.Add($folder)){$folder=(SafeName $number)+'_'+$suffix;$suffix++}
+ $projectBatch=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+ if($script:ProjectBatch.ContainsKey($number)){$projectBatch[$number]=$script:ProjectBatch[$number]}
+ $trussBatch=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+ if($script:TrussBatch.ContainsKey($number)){$trussBatch[$number]=$script:TrussBatch[$number]}
+$ps=[powershell]::Create();$ps.RunspacePool=$parallelPool
+$resultBox=@{value=$null}
+ [void]$ps.AddScript(@'
+param($number,$archive,$dbOnly,$ci,$folder,$projectBatch,$trussBatch,$cut,$resultBox)
+$ErrorActionPreference='Stop'
+$script:ProjectBatch=$projectBatch
+$script:TrussBatch=$trussBatch
+$analysisWatch=[Diagnostics.Stopwatch]::StartNew()
+try{
+ if($dbOnly){$o=AnalyzeDbOnly $number $ci $cut}else{$o=AnalyzeProject $number $archive $cut}
+}catch{
+ $resultBox.value=[pscustomobject]@{row=$null;warning=($_.Exception.Message+' @ '+$_.InvocationInfo.ScriptLineNumber)}
+ return
+}
+$analysisWatch.Stop()
+$reportWatch=[Diagnostics.Stopwatch]::StartNew()
+try{$row=WriteProject $o $number $folder}
+catch{$resultBox.value=[pscustomobject]@{row=$null;warning=$null;error=($_.Exception.Message+' folder='+[string]$folder+' @ '+$_.ScriptStackTrace)};return}
+$reportWatch.Stop()
+$resultBox.value=[pscustomobject]@{row=$row;warning=$null;error=$null;analysisMs=$analysisWatch.Elapsed.TotalMilliseconds;reportMs=$reportWatch.Elapsed.TotalMilliseconds}
+'@)
+ foreach($arg in @($number,$archive,[bool]$dbOnly,$ci,$folder,$projectBatch,$trussBatch,$cut,$resultBox)){[void]$ps.AddArgument($arg)}
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ try{$handle=$ps.BeginInvoke()}catch{$ps.Dispose();throw}
+ [void]$pending.Add([pscustomobject]@{ps=$ps;handle=$handle;result=$resultBox;number=$number;ordinal=$ordinal;kind=$kind;watch=$watch})
+}
+function FinishParallelProject{
+ $handles=[Threading.WaitHandle[]]@($pending | ForEach-Object {$_.handle.AsyncWaitHandle})
+ $finished=[Threading.WaitHandle]::WaitAny($handles)
+ $job=$pending[$finished]
+ try{
+  try{[void]$job.ps.EndInvoke($job.handle)}catch{throw ('Parallel worker failed for '+$job.number+': '+$_.Exception.Message+' '+($job.ps.Streams.Error | Out-String))}
+  $result=$job.result.value
+  if($null -eq $result){throw ('Parallel worker returned no result for project '+$job.number)}
+  if($result.error){throw ('Parallel worker failed for '+$job.number+': '+$result.error)}
+  if($result.warning){Write-Warning ($job.number+': '+$result.warning)}
+  elseif($null -eq $result.row){throw ('Parallel worker returned no report for project '+$job.number)}
+  else{[void]$results.Add($result.row)}
+  if($TimingLog){
+   $script:DiagnosticProjectIndex=$job.ordinal;$script:DiagnosticKind=$job.kind
+   $job.watch.Stop()
+   $trusses=if($result.row){$result.row.counts.trusses}else{0}
+   if($result.row){
+    LogTiming 'analysis' $result.analysisMs 0 $trusses
+    $htmlBytes=([IO.FileInfo]::new((Join-Path $outDir ('projects\'+$result.row.folder+'\project.html')))).Length
+    LogTiming 'report' $result.reportMs 0 $trusses 0 0 $htmlBytes
+   }
+   LogTiming 'parallel_project' $job.watch.Elapsed.TotalMilliseconds 0 $trusses
+  }
+ }finally{
+  $job.ps.Dispose()
+  ReleaseProject $job.number
+  $pending.RemoveAt($finished)
+ }
+}
+if($ParallelProjects -gt 1){
+ $state=[Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+ $tokens=$null;$parseErrors=$null
+ $ast=[Management.Automation.Language.Parser]::ParseFile($PSCommandPath,[ref]$tokens,[ref]$parseErrors)
+ if($parseErrors.Count){throw 'Cannot initialize parallel workers: script parse error.'}
+ foreach($fn in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)){
+  $body=$fn.Body.Extent.Text
+  $parameters=if($fn.Parameters.Count){'param('+(@($fn.Parameters | ForEach-Object {$_.Extent.Text}) -join ',')+")`n"}else{''}
+  $state.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($fn.Name,$parameters+$body.Substring(1,$body.Length-2)))
+ }
+ $workerVars=@('Client','Database','IncludeTrussJson','LegacyCutoffVersion','LegacyState','Badge','Groups','Map','MapMeta','Rules','StaleRules','Css','ProjectTemplate','modeLabel','outDir')
+ foreach($name in $workerVars){$state.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new($name,(Get-Variable -Name $name -ValueOnly),'Report configuration'))}
+ $state.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('TimingLog',$false,'Worker timing is collected by the parent'))
+ $state.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('ParallelWorker',$true,'Return index rows to the parent'))
+ $parallelPool=[runspacefactory]::CreateRunspacePool(1,$ParallelProjects,$state,$Host)
+ $parallelPool.Open()
+ $pending=[Collections.Generic.List[object]]::new()
+}
 $results=[Collections.Generic.List[object]]::new()
 $used=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $i=0;$batchEnd=-1
@@ -855,6 +940,7 @@ try{
 foreach($w in $work){
  if($TimingLog){$script:DiagnosticKind='archive';$script:DiagnosticProjectIndex=$i+1}
  if($i -gt $batchEnd){
+  if($ParallelProjects -gt 1){while($pending.Count){FinishParallelProject}}
   if($TimingLog){LogTiming 'batch_start';$batchTimer=[Diagnostics.Stopwatch]::StartNew()}
   $batchEnd=DbBatchEnd $work $i
   LoadDbBatch @($work[$i..$batchEnd] | ForEach-Object {$_[0]})
@@ -868,6 +954,11 @@ foreach($w in $work){
   $progressTimer.Restart()
  }
  $number=$w[0]
+ if($ParallelProjects -gt 1){
+  StartParallelProject $number $w[1] $false $null $i 'archive'
+  if($pending.Count -ge $ParallelProjects){FinishParallelProject}
+  continue
+ }
  try{
   if($TimingLog){LogTiming 'analysis_start';$analysisTimer=[Diagnostics.Stopwatch]::StartNew()}
   try{$o=AnalyzeProject $number $w[1] $cut}
@@ -876,6 +967,7 @@ foreach($w in $work){
   WriteProject $o $number
  }finally{ReleaseProject $number;$o=$null;LogTiming 'project_released'}
 }
+if($ParallelProjects -gt 1){while($pending.Count){FinishParallelProject}}
 if($IncludeDbOnly){
  if($TimingLog){$script:DiagnosticKind='db_only';$script:DiagnosticProjectIndex=0;LogTiming 'db_only_discovery_start'}
  $discoveryWatch=[Diagnostics.Stopwatch]::StartNew()
@@ -915,6 +1007,7 @@ if($IncludeDbOnly){
  foreach($w in $dbOnly){
   if($TimingLog){$script:DiagnosticProjectIndex=$k+1}
   if($k -gt $batchEnd){
+   if($ParallelProjects -gt 1){while($pending.Count){FinishParallelProject}}
    if($TimingLog){LogTiming 'batch_start'}
    $batchWatch=[Diagnostics.Stopwatch]::StartNew()
    $batchEnd=DbBatchEnd $dbOnly $k
@@ -931,6 +1024,11 @@ if($IncludeDbOnly){
    $dbProgressTimer.Restart()
   }
   $projectWatch=[Diagnostics.Stopwatch]::StartNew()
+  if($ParallelProjects -gt 1){
+   StartParallelProject $w[0] $null $true $w[1] $k 'db_only'
+   if($pending.Count -ge $ParallelProjects){FinishParallelProject}
+   continue
+  }
   try{
    if($TimingLog){LogTiming 'analysis_start';$analysisTimer=[Diagnostics.Stopwatch]::StartNew()}
    try{$o=AnalyzeDbOnly $w[0] $w[1] $cut}
@@ -944,9 +1042,16 @@ if($IncludeDbOnly){
    }
   }finally{ReleaseProject $w[0];$o=$null;LogTiming 'project_released'}
  }
+ if($ParallelProjects -gt 1){while($pending.Count){FinishParallelProject}}
  Write-Progress -Activity 'DB-only projects' -Completed
 }
-}finally{LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed}
+}finally{
+ if($ParallelProjects -gt 1){
+  while($pending.Count){try{FinishParallelProject}catch{Write-Warning $_.Exception.Message}}
+  $parallelPool.Dispose()
+ }
+ LoadDbBatch @();$script:Conn.Dispose();Write-Progress -Activity 'Analyzing projects' -Completed
+}
 
 if($TimingLog){$script:DiagnosticKind='index';$script:DiagnosticProjectIndex=0;LogTiming 'index_start';$indexTimer=[Diagnostics.Stopwatch]::StartNew()}
 $order=@{'Inconsistent'=0;'Stale DB'=1;'Not in DB'=2;'Consistent'=3;'DB only'=5}
