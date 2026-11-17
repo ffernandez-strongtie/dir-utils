@@ -1,15 +1,41 @@
 # CSDirector / TrussStudio Insights
 
-`csdirector-database-project-insights.ps1` compares the trusses stored in the CSDirector database with the TrussStudio files inside each `.csdproj` archive and writes a browsable summary. It is read-only.
+`csdirector-database-project-insights.ps1` compares the trusses stored in the CSDirector database with the TrussStudio files saved inside each `.csdproj` project archive, then writes a report you open in your browser. It only reads: it does not change the database or any project file.
 
 ## Run
+
+### 1. Open PowerShell in the script folder
+
+In File Explorer, open the folder that holds `csdirector-database-project-insights.ps1`, click the address bar, type `powershell` and press Enter. A PowerShell window opens in that folder.
+
+### 2. Allow scripts for this window (only if PowerShell blocks the script)
+
+If PowerShell says running scripts is disabled, paste this into the same window and press Enter:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+This applies only to that window, ends when the window closes, and does not override your organization's Group Policy. If the block persists, ask IT.
+
+### 3. Run the report
+
+**Using your Windows sign-in?** For a standard server setup, copy and run this command:
+
+```powershell
+.\csdirector-database-project-insights.ps1
+```
+
+**Given a separate SQL login?** Use this example instead. Replace each `<...>` placeholder, including the angle brackets, with the details you were given. Replace `C:\path\to\projects` with your projects folder path.
 
 ```powershell
 $env:CSD_SQL_PASSWORD = '<password>'
 .\csdirector-database-project-insights.ps1 -SqlUser '<sql-user>' -Server '<server-or-instance>' -ProjectsRoot 'C:\path\to\projects'
 ```
 
-Without `-SqlUser` it uses Windows authentication. The password is only read from `CSD_SQL_PASSWORD`.
+### 4. Open the report
+
+Back in File Explorer, open the newest `output-insights-<timestamp>` folder in the folder where you opened PowerShell. Double-click `index.html` to view the report in your browser.
 
 | Parameter | Default | Purpose |
 |---|---|---|
