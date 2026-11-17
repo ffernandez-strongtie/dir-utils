@@ -26,6 +26,8 @@ This applies only to that window, ends when the window closes, and does not over
 .\csdirector-database-project-insights.ps1
 ```
 
+---
+
 **Given a separate SQL login?** Use this example instead. Replace each `<...>` placeholder, including the angle brackets, with the details you were given. Replace `C:\path\to\projects` with your projects folder path.
 
 ```powershell
