@@ -1,4 +1,4 @@
-#requires -Version 5.1
+#requires -Version 5.1 
 <#
 .SYNOPSIS
 Read-only comparison of CSDirector database trusses with the TrussStudio files inside .csdproj archives. Produces a summary index, one page per project and JSON for each project and truss.
