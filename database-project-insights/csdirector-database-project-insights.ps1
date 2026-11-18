@@ -641,7 +641,7 @@ if(r[2].length)h+='<p class=note>'+r[2].map(f=>'<b>'+f[6]+'</b>: '+f[0]+' - '+es
 const bad=F.filter(f=>f.match===false),rest=F.filter(f=>f.match!==false);
 const row=(f)=>'<tr class="'+(f.match===false?'dd':'')+'"><td>'+esc(f.group)+'</td><td>'+esc(f.field)+'</td><td>'+esc(f.column)+'</td><td class="'+(f.match===false?'d':f.match?'f':'')+'">'+fv(f.db)+'</td><td class="'+(f.match===false?'d':f.match?'f':'')+'">'+fv(f.file)+'</td><td>'+esc(f.status||(f.match===false?'differs':f.match?'match':'n/a'))+(f.basis==='candidate'?'<br><small>candidate mapping not confirmed; values retained, never flagged</small>':'')+'</td></tr>';
 const extra=r[2].filter(f=>f[0]!='Truss value differs'&&f[0]!='Truss version differs');
-const xr=extra.map(f=>'<tr class=dd><td>'+f[6]+'</td><td>'+esc(f[1])+'</td><td>-</td><td class=d>'+fv(f[2])+'</td><td class=d>'+fv(f[3])+'</td><td>'+(f[4]=='stale'?'stale':'differs')+'</td></tr>').join('');
+const xr=extra.map(f=>{const isDbColumn=f[1]==='ComponentHeader.Name';return '<tr class=dd><td>'+f[6]+'</td><td>'+(isDbColumn?'-':esc(f[1]))+'</td><td>'+(isDbColumn?esc(f[1]):'-')+'</td><td class=d>'+fv(f[2])+'</td><td class=d>'+fv(f[3])+'</td><td>'+(f[4]=='stale'?'stale':'differs')+'</td></tr>'}).join('');
 if(F.length||xr){h+='<table class=sbs><tr><th>Group</th><th>JSON field</th><th>DB column</th><th>DB</th><th>File (archive)</th><th>Status</th></tr>'+xr+bad.map(row).join('')+(all_.has(i)||!bad.length?rest.map(row).join(''):'')+'</table>';
 if(rest.length&&bad.length)h+='<a href="#" onclick="all_.has('+i+')?all_.delete('+i+'):all_.add('+i+');draw();return false">'+(all_.has(i)?'hide':'show')+' '+rest.length+' matching/other fields</a>';}
 else h+='<p>No values recorded.</p>';
